@@ -1,0 +1,27 @@
+display_name: Hourglass
+package_name: hourglass
+summary: Hourglass
+group: Applications/Internet
+vendor: Hourglass
+packager: Hourglass
+license: Other
+priority: optional
+section: x11
+essential: false
+url: https://hourglass.app
+icon: assets/images/app_icon_256.png
+
+keywords:
+  - Hourglass
+
+generic_name: Hourglass
+
+categories:
+  - Applications/Internet
+
+startup_notify: true
+
+# Exclude Debian/Ubuntu-specific libcurl symbol versions (e.g. CURL_OPENSSL_4)
+# to prevent RPM dependency resolution failures on Fedora/RHEL/openSUSE
+spec_macros:
+  - '%global __requires_exclude ^libcurl\\.so\\.4\\(CURL_OPENSSL_.*\\).*$'

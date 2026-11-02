@@ -1,0 +1,20 @@
+#ifndef FLUTTER_MY_APPLICATION_H_
+#define FLUTTER_MY_APPLICATION_H_
+
+#include <gtk/gtk.h>
+
+G_DECLARE_FINAL_TYPE(MyApplication, my_application, MY, APPLICATION,
+                     GtkApplication)
+
+void my_application_configure_windowing();
+
+/**
+ * my_application_new:
+ *
+ * Creates a new Flutter-based application.
+ *
+ * Returns: a new #MyApplication.
+ */
+MyApplication* my_application_new();
+
+#endif  // FLUTTER_MY_APPLICATION_H_

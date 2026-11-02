@@ -1,0 +1,14 @@
+display_name: Hourglass
+package_name: hourglass
+maintainer:
+  name: Hourglass
+
+icon: assets/images/app_icon_256.png
+
+keywords:
+  - Hourglass
+
+generic_name: Hourglass
+
+categories:
+  - Network

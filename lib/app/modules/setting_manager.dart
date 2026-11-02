@@ -1,0 +1,2107 @@
+// ignore_for_file: empty_catches
+
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+
+import 'package:country/country.dart' as country;
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/widgets.dart';
+import 'package:hourglass/app/runtime/type_checker.dart';
+import 'package:hourglass/app/utils/accessibility_utils.dart';
+import 'package:hourglass/app/utils/app_utils.dart';
+import 'package:hourglass/app/utils/cloudflare_warp_api.dart';
+import 'package:hourglass/app/utils/convert_utils.dart';
+import 'package:hourglass/app/utils/file_utils.dart';
+import 'package:hourglass/app/utils/log.dart';
+import 'package:hourglass/app/utils/network_utils.dart';
+import 'package:hourglass/app/utils/path_utils.dart';
+import 'package:hourglass/app/utils/platform_utils.dart';
+import 'package:hourglass/app/utils/proxy_conf_utils.dart';
+import 'package:hourglass/app/utils/singbox_config_builder.dart';
+import 'package:hourglass/app/utils/singbox_outbound.dart';
+import 'package:hourglass/i18n/strings.g.dart';
+import 'package:hourglass/screens/widgets/text_field.dart';
+import 'package:vpn_service/proxy_manager.dart';
+
+Map<String, dynamic> removeNotMap(Map<String, dynamic> object) {
+  object.removeWhere((key, value) {
+    return value == null || value is! Map<String, dynamic>;
+  });
+  return object;
+}
+
+//UI
+class SettingConfigItemUICloudflareWarp {
+  WarpAccount account = WarpAccount();
+  String license = "";
+  Map<String, dynamic> toJson() => {
+    //'account': warpAccount,
+    'license': license,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    // account.fromJson(map["account"]);
+    license = map["license"] ?? "";
+  }
+
+  static SettingConfigItemUICloudflareWarp fromJsonStatic(
+    Map<String, dynamic>? map,
+  ) {
+    SettingConfigItemUICloudflareWarp config =
+        SettingConfigItemUICloudflareWarp();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemAutobackup {
+  static const int kMaxCount = 5;
+  bool addProfile = true;
+  bool removeProfile = false;
+
+  Map<String, dynamic> toJson() => {
+    'add_profile': addProfile,
+    'remove_profile': removeProfile,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    addProfile = map["add_profile"] ?? true;
+    removeProfile = map["remove_profile"] ?? false;
+  }
+
+  static SettingConfigItemAutobackup fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemAutobackup config = SettingConfigItemAutobackup();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemStatistics {
+  static int kMaxCacheDays = 30;
+  bool enable = false;
+  bool dataDesensitize = true;
+  int cacheDays = 7;
+  int? cacheSizeLimitMB = 1024; //1G
+
+  Map<String, dynamic> toJson() => {
+    'enable': enable,
+    'data_desensitize': dataDesensitize,
+    'cache_days': cacheDays,
+    'cache_size_limit_mb': cacheSizeLimitMB,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    enable = map["enable"] ?? false;
+    dataDesensitize = map["data_desensitize"] ?? true;
+    cacheDays = map["cache_days"] ?? 7;
+    if (cacheDays < 1) {
+      cacheDays = 1;
+    }
+    if (cacheDays > kMaxCacheDays) {
+      cacheDays = kMaxCacheDays;
+    }
+    cacheSizeLimitMB = map["cache_size_limit_mb"] ?? 1024;
+  }
+
+  static SettingConfigItemStatistics fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemStatistics config = SettingConfigItemStatistics();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemUI {
+  String theme = "light";
+  bool autoOrientation = false;
+  bool hideDockIcon = false; //macos
+  bool excludeFromRecent = false; // android
+  bool wakeLock = false; //android
+  bool hideVpn =
+      false; //ios https://github.com/seniorbruce721/surge/blob/0a53e57f23445a3e6f4f59b10a4c83eae4378e38/%E7%A5%9E%E6%9C%BApro#L52   Wi-Fi状态下正常生效，数据连接模式下需禁用IPV6 VIF设置才可生效?
+  bool disableFontScaler = false;
+  bool accessibility = AccessibilityUtils.getAccessibilityEnabled();
+  bool hideAfterLaunch = false;
+  String netCheckDomain = "google.com";
+  String diversionRuleDetectDomain = "google.com";
+  bool tvMode = false; // Initialize with a default value
+
+  Map<String, dynamic> toJson() => {
+    'theme': theme,
+    'auto_orientation': autoOrientation,
+    'hide_dock_icon': hideDockIcon,
+    'exclude_from_recent': excludeFromRecent,
+    'wake_lock': wakeLock,
+    'hide_vpn': hideVpn,
+    'disable_font_scaler': disableFontScaler,
+    'accessibility': accessibility,
+    'hide_after_launch': hideAfterLaunch,
+    'net_check_domain': netCheckDomain,
+    'diversion_rule_detect_domain': diversionRuleDetectDomain,
+    'tv_mode': tvMode,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    theme = map["theme"] ?? "";
+    autoOrientation = map["auto_orientation"] ?? false; // Default value
+    hideDockIcon = map["hide_dock_icon"] ?? false;
+    excludeFromRecent = map["exclude_from_recent"] ?? false;
+    wakeLock = map["wake_lock"] ?? false;
+    hideVpn = map["hide_vpn"] ?? false;
+    disableFontScaler = map["disable_font_scaler"] ?? false;
+    accessibility =
+        map["accessibility"] ?? AccessibilityUtils.getAccessibilityEnabled();
+    hideAfterLaunch = map["hide_after_launch"] ?? false;
+    netCheckDomain = map["net_check_domain"] ?? "google.com";
+    diversionRuleDetectDomain =
+        map["diversion_rule_detect_domain"] ?? "google.com";
+    if (Platform.isAndroid) {
+      tvMode = map["tv_mode"] ?? false; // Default value
+      TextFieldEx.popupEdit = tvMode;
+    }
+
+    switch (theme) {
+      case "black":
+      case "dark":
+        theme = "dark";
+        break;
+      case "white":
+      case "light":
+        theme = "light";
+        break;
+      case "system":
+        theme = "system";
+        break;
+      default:
+        theme = "light";
+        break;
+    }
+  }
+
+  static SettingConfigItemUI fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemUI config = SettingConfigItemUI();
+    config.fromJson(map);
+    return config;
+  }
+
+  static Future<bool> maybeTv() async {
+    if (Platform.isAndroid) {
+      final deviceInfo = await DeviceInfoPlugin().deviceInfo;
+      if (deviceInfo is AndroidDeviceInfo) {
+        final systemFeatures = deviceInfo.systemFeatures;
+        if (systemFeatures.contains("android.hardware.type.television") ||
+            systemFeatures.contains("android.software.leanback")) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+}
+
+class SettingConfigItemWindow {
+  static Size kMinWindowSize = Platform.isLinux
+      ? const Size(400, 740)
+      : const Size(400, 700);
+  double x = 0;
+  double y = 0;
+  double width = 0;
+  double height = 0;
+
+  Map<String, dynamic> toJson() => {
+    'x': x.toInt(),
+    'y': y.toInt(),
+    'width': width.toInt(),
+    'height': height.toInt(),
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    x = (map["x"] ?? 0).toDouble();
+    y = (map["y"] ?? 0).toDouble();
+    width = (map["width"] ?? 0).toDouble();
+    height = (map["height"] ?? 0).toDouble();
+  }
+
+  static SettingConfigItemWindow fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemWindow config = SettingConfigItemWindow();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemUIScreen {
+  static const String backgroundTypeLocal = "local";
+  static const String backgroundTypeRemote = "remote";
+  static const String backgroundTypeDisable = "";
+  static bool fastCachedImageConfigInited = false;
+  List<String> widgets = [];
+  int widgetsAlpha = 255;
+
+  bool hideInvalidServerMyProfiles = false;
+  bool hideInvalidServerSelectServer = false;
+  bool hideInvalidServerDiversionRules = false;
+  bool sortServerMyProfiles = false;
+  bool sortServerSelectServer = false;
+  bool sortServerDiversionRules = false;
+  bool selectServerHideRecommand = false;
+  bool selectServerHideRecent = false;
+  bool selectServerHideFav = false;
+  bool hideUnusedDiversionGroup = false;
+  String myLink = "";
+  String backgroundImageType = backgroundTypeDisable;
+  String backgroundImageUrl = "";
+  String backgroundImageLocal = "";
+
+  Map<String, dynamic> toJson() => {
+    'widgets': widgets,
+    'widgets_alpha': widgetsAlpha,
+    'hide_invalid_server_my_profiles': hideInvalidServerMyProfiles,
+    'hide_invalid_server_select_server': hideInvalidServerSelectServer,
+    'hide_invalid_server_diversion_rules': hideInvalidServerDiversionRules,
+    'sort_server_my_profiles': sortServerMyProfiles,
+    'sort_server_select_server': sortServerSelectServer,
+    'sort_server_diversion_rules': sortServerDiversionRules,
+    'select_server_hide_recommand': selectServerHideRecommand,
+    'select_server_hide_recent': selectServerHideRecent,
+    'select_server_hide_fav': selectServerHideFav,
+    'hide_unused_diversion_group': hideUnusedDiversionGroup,
+    'my_link': myLink,
+    'background_image_type': backgroundImageType,
+    'background_image': backgroundImageUrl,
+    'background_image_local': backgroundImageLocal,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    widgets = ConvertUtils.getListStringFromDynamic(map["widgets"], true, [])!;
+    try {
+      widgetsAlpha = map['widgets_alpha'] ?? 255;
+    } catch (e) {
+      widgetsAlpha = 255;
+    }
+    if (widgetsAlpha < 0 || widgetsAlpha > 255) {
+      widgetsAlpha = 255;
+    }
+
+    hideInvalidServerMyProfiles =
+        map["hide_invalid_server_my_profiles"] ?? false;
+    hideInvalidServerSelectServer =
+        map["hide_invalid_server_select_server"] ?? false;
+    hideInvalidServerDiversionRules =
+        map["hide_invalid_server_diversion_rules"] ??
+        map["hide_invalid_server_routing_group_strategy"] ??
+        false;
+    sortServerMyProfiles = map["sort_server_my_profiles"] ?? false;
+    sortServerSelectServer = map["sort_server_select_server"] ?? false;
+    sortServerDiversionRules = map["sort_server_diversion_rules"] ?? false;
+    selectServerHideRecommand = map["select_server_hide_recommand"] ?? false;
+    selectServerHideRecent = map["select_server_hide_recent"] ?? false;
+    selectServerHideFav = map["select_server_hide_fav"] ?? false;
+    hideUnusedDiversionGroup = map["hide_unused_diversion_group"] ?? false;
+    myLink = map["my_link"] ?? "";
+
+    final backgroundImageType_ = map["background_image_type"];
+    backgroundImageUrl = map["background_image"] ?? "";
+    backgroundImageLocal = map["background_image_local"] ?? "";
+    if (backgroundImageType_ == null) {
+      if (backgroundImageUrl.isNotEmpty) {
+        backgroundImageType = backgroundTypeRemote;
+      } else {
+        backgroundImageType = backgroundTypeDisable;
+      }
+    } else {
+      if ([
+        backgroundTypeLocal,
+        backgroundTypeRemote,
+        backgroundTypeDisable,
+      ].contains(backgroundImageType_)) {
+        backgroundImageType = backgroundImageType_;
+      }
+    }
+  }
+
+  static SettingConfigItemUIScreen fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemUIScreen config = SettingConfigItemUIScreen();
+    config.fromJson(map);
+    return config;
+  }
+
+  String getMyLink() {
+    const int kMaxLength = 30;
+    if (myLink.length > kMaxLength) {
+      return "${myLink.substring(0, kMaxLength)}...";
+    }
+    return myLink;
+  }
+
+  static List<int> widgetsAlphaInt = [0, 20, 50, 100, 255];
+
+  int getWidgetAlpha() {
+    if (backgroundImageType == backgroundTypeDisable) {
+      return 255;
+    }
+    if (backgroundImageUrl.isEmpty && backgroundImageLocal.isEmpty) {
+      return 255;
+    }
+    if (widgetsAlphaInt.contains(widgetsAlpha)) {
+      return widgetsAlpha;
+    }
+    if (widgetsAlpha < 0 || widgetsAlpha > 255) {
+      return 255;
+    }
+    if (widgetsAlpha >= 0 && widgetsAlpha < 20) {
+      return 0;
+    }
+    if (widgetsAlpha >= 20 && widgetsAlpha < 50) {
+      return 20;
+    }
+    if (widgetsAlpha >= 50 && widgetsAlpha < 100) {
+      return 50;
+    }
+    if (widgetsAlpha >= 100 && widgetsAlpha < 255) {
+      return 100;
+    }
+    return 255;
+  }
+}
+
+//Dev
+class SettingConfigItemDev {
+  static int pprofPortDefault = 3060;
+  bool devMode = false;
+
+  String logLevel = SingboxLogLevel.error.name;
+  int pprofPort = 0;
+  bool allowRemoteAccessPprof = false;
+  bool allowRemoteAccessHtmlBoard = false;
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'log_level': logLevel,
+      'pprof_port': pprofPort,
+      'allow_remote_access_pprof': allowRemoteAccessPprof,
+      'allow_remote_access_htmlboard': allowRemoteAccessHtmlBoard,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    logLevel = map["log_level"] ?? SingboxLogLevel.error.name;
+    if (!SingboxLogLevel.names().contains(logLevel)) {
+      logLevel = SingboxLogLevel.error.name;
+    }
+    pprofPort = map["pprof_port"] ?? 0;
+    allowRemoteAccessPprof = map["allow_remote_access_pprof"] ?? false;
+    allowRemoteAccessHtmlBoard = map["allow_remote_access_htmlboard"] ?? false;
+  }
+
+  static SettingConfigItemDev fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemDev config = SettingConfigItemDev();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemWebDev {
+  String url = "";
+  String user = "";
+  String password = "";
+  ProxyStrategy connectMode = ProxyStrategy.preferDirect;
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'url': url,
+      'user': user,
+      'password': password,
+      'connect_mode': connectMode.name,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    url = map["url"] ?? "";
+    user = map["user"] ?? "";
+    password = map["password"] ?? "";
+    connectMode = ProxyStrategy.values.firstWhere(
+      (e) => e.name == map["connect_mode"],
+      orElse: () => ProxyStrategy.preferDirect,
+    );
+  }
+
+  static SettingConfigItemWebDev fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemWebDev config = SettingConfigItemWebDev();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemNTP {
+  static const List<String> kNTPServerList = [
+    "time.apple.com",
+    "time.windows.com",
+    "time.google.com",
+    "pool.ntp.org",
+    "ntp.aliyun.com",
+    "ntp.iranet.ir",
+  ];
+  bool enable = false;
+  String server = getServer();
+  int port = 123;
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {'enable': enable, 'server': server};
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    enable = map["enable"] ?? false;
+    server = map["server"] ?? getServer();
+  }
+
+  static SettingConfigItemNTP fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemNTP config = SettingConfigItemNTP();
+    config.fromJson(map);
+    return config;
+  }
+
+  static String getServer() {
+    return Platform.isIOS || Platform.isMacOS
+        ? "time.apple.com"
+        : "time.windows.com";
+  }
+}
+
+class SettingConfigItemTUN {
+  bool enable = getTun();
+  String stack = getStack();
+  Duration udpTimeout = const Duration(minutes: 5);
+  String ipv4Address = SingboxInboundTunOptions.ipv4Address;
+  String ipv6Address = SingboxInboundTunOptions.ipv6Address;
+  int mtu = 4064;
+  bool autoRoute = true;
+  bool autoRedirect = false;
+  bool strictRoute = false;
+  bool includeAllNetworks = false;
+  bool excludeLocalNetworks = false;
+  bool excludeCellularServices = false;
+  bool excludeApns = false;
+  bool excludeDeviceCommunication = false;
+  bool enforceRoutes = false;
+  bool autoRouteUseSubRangesByDefault = false; // ios/macos
+  bool overrideAndroidVPN = false; //android
+  bool allowBypass = false; //android
+  bool appendHttpProxy =
+      getAppendHttp(); //android, ios: some apps skip tun route
+  //bool allowBypassHttpProxy = true;
+  //List<String> allowBypassHttpProxyDomains = ProxyBypassDoaminsDefault.toList();
+  bool hijackDns = true;
+  String loopbackAddress = "";
+  bool routeExclude = true;
+  bool routeExcludeAddressTun = Platform.isWindows;
+  bool routeExcludeAddressMulticast = false;
+  List<String> routeExcludeAddress = [];
+  bool macAddressInclude = false; //linux
+  List<String> macAddress = []; //linux
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'enable': enable,
+      'stack': stack,
+      'udp_timeout': udpTimeout.inSeconds,
+      'ipv4_address': ipv4Address,
+      'ipv6_address': ipv6Address,
+      'mtu': mtu,
+      'auto_route': autoRoute,
+      'auto_redirect': autoRedirect,
+      'strict_route': strictRoute,
+      'include_all_networks': includeAllNetworks,
+      'exclude_local_networks': excludeLocalNetworks,
+      'exclude_cellular_services': excludeCellularServices,
+      'exclude_apns': excludeApns,
+      'exclude_device_communication': excludeDeviceCommunication,
+      'enforce_routes': enforceRoutes,
+      'auto_route_use_sub_ranges_by_default': autoRouteUseSubRangesByDefault,
+      'override_android_vpn': overrideAndroidVPN,
+      'allow_bypass': allowBypass,
+      'append_http_proxy': appendHttpProxy,
+      //'allow_bypass_httpproxy': allowBypassHttpProxy,
+      //'allow_bypass_httpproxy_domains': allowBypassHttpProxyDomains,
+      'hijack_dns': hijackDns,
+      'loopback_address': loopbackAddress,
+      'route_exclude': routeExclude,
+      'route_exclude_address_tun': routeExcludeAddressTun,
+      'route_exclude_address_multicast': routeExcludeAddressMulticast,
+      'route_exclude_address': routeExcludeAddress,
+      'mac_address_include': macAddressInclude,
+      'mac_address': macAddress,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    enable = map["enable"] ?? map["tun"] ?? getTun();
+    stack = map["stack"] ?? map["tun_stack"] ?? "";
+    if (stack.isEmpty) {
+      stack = getStack();
+    }
+    if (map["udp_timeout"] != null) {
+      udpTimeout = Duration(seconds: map["udp_timeout"]);
+      if (udpTimeout.inDays > 365) {
+        udpTimeout = const Duration(days: 365);
+      }
+      if (udpTimeout.inSeconds < 5) {
+        udpTimeout = const Duration(seconds: 15);
+      }
+    }
+    ipv4Address =
+        map["ipv4_address"] ??
+        map["i4_address"] ??
+        SingboxInboundTunOptions.ipv4Address;
+    if (!NetworkUtils.isIpv4WithMask(ipv4Address)) {
+      ipv4Address = SingboxInboundTunOptions.ipv4Address;
+    }
+    ipv6Address = map["ipv6_address"] ?? SingboxInboundTunOptions.ipv6Address;
+    if (!NetworkUtils.isIpv6WithMask(ipv6Address)) {
+      ipv6Address = SingboxInboundTunOptions.ipv6Address;
+    }
+    mtu = map["mtu"] ?? 4064;
+    if (mtu == 0) {
+      mtu = 4064;
+    }
+    autoRoute = map["auto_route"] ?? true;
+    autoRedirect = map["auto_redirect"] ?? false;
+    strictRoute = map["strict_route"] ?? false;
+    includeAllNetworks = map["include_all_networks"] ?? false;
+    excludeLocalNetworks = map["exclude_local_networks"] ?? false;
+    excludeCellularServices = map["exclude_cellular_services"] ?? false;
+    excludeApns = map["exclude_apns"] ?? false;
+    excludeDeviceCommunication = map["exclude_device_communication"] ?? false;
+    enforceRoutes = map["enforce_routes"] ?? false;
+    autoRouteUseSubRangesByDefault =
+        map["auto_route_use_sub_ranges_by_default"] ?? false;
+    allowBypass = map["allow_bypass"] ?? false;
+    overrideAndroidVPN = map["override_android_vpn"] ?? false;
+    appendHttpProxy = map["append_http_proxy"] ?? getAppendHttp();
+    //allowBypassHttpProxy = map["allow_bypass_httpproxy"] ?? true;
+    //allowBypassHttpProxyDomains = ConvertUtils.getListStringFromDynamic(
+    //  map["allow_bypass_httpproxy_domains"],
+    //  true,
+    //  ProxyBypassDoaminsDefault.toList(),
+    //)!;
+    hijackDns = map["hijack_dns"] ?? true;
+    loopbackAddress = map["loopback_address"] ?? "";
+    if (!NetworkUtils.isIpv4(loopbackAddress) &&
+        !NetworkUtils.isIpv6(loopbackAddress)) {
+      loopbackAddress = "";
+    }
+    routeExclude = map["route_exclude"] ?? true;
+    routeExcludeAddressTun =
+        map["route_exclude_address_tun"] ?? Platform.isWindows;
+    routeExcludeAddressMulticast =
+        map["route_exclude_address_multicast"] ?? false;
+    routeExcludeAddress = ConvertUtils.getListStringFromDynamic(
+      map["route_exclude_address"],
+      true,
+      [],
+    )!;
+    macAddressInclude = map["mac_address_include"] ?? false;
+    macAddress = ConvertUtils.getListStringFromDynamic(
+      map["mac_address"],
+      true,
+      [],
+    )!;
+  }
+
+  List<String> getAddress(IPStrategy ipStrategy) {
+    int ipv4Mask = 30;
+    int ipv6Mask = 126;
+    if (ipv4Address.isNotEmpty) {
+      if (NetworkUtils.isIpv4(ipv4Address)) {
+        SingboxInboundTunOptions.ipv4Address = ipv4Address;
+      } else if (NetworkUtils.isIpv4WithMask(ipv4Address)) {
+        SingboxInboundTunOptions.ipv4Address = ipv4Address.split("/")[0];
+        ipv4Mask = int.tryParse(ipv4Address.split("/").last) ?? 30;
+        if (ipv4Mask > 30) {
+          ipv4Mask = 30;
+        }
+        if (ipv4Mask < 24) {
+          ipv4Mask = 24;
+        }
+      }
+    }
+
+    List<String> result = ["${SingboxInboundTunOptions.ipv4Address}/$ipv4Mask"];
+    if (ipStrategy.index >= IPStrategy.preferIPv4.index) {
+      if (NetworkUtils.isIpv6(ipv6Address)) {
+        SingboxInboundTunOptions.ipv6Address = ipv6Address;
+      } else if (NetworkUtils.isIpv6WithMask(ipv6Address)) {
+        SingboxInboundTunOptions.ipv6Address = ipv6Address.split("/")[0];
+        ipv6Mask = int.tryParse(ipv6Address.split("/").last) ?? 126;
+        if (ipv6Mask > 126) {
+          ipv6Mask = 126;
+        }
+        if (ipv6Mask < 64) {
+          ipv6Mask = 64;
+        }
+      }
+      result.add("${SingboxInboundTunOptions.ipv6Address}/$ipv6Mask");
+    }
+    return result;
+  }
+
+  static SettingConfigItemTUN fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemTUN config = SettingConfigItemTUN();
+    config.fromJson(map);
+    return config;
+  }
+
+  static bool getTun() {
+    if (Platform.isWindows) {
+      return false;
+    }
+    return true;
+  }
+
+  static String getStack() {
+    if (Platform.isAndroid) {
+      return "gvisor";
+    }
+    if (Platform.isWindows) {
+      return "gvisor";
+    }
+    return "gvisor";
+  }
+
+  static bool getAppendHttp() {
+    if (Platform.isAndroid) {
+      return false;
+    }
+    return true;
+  }
+}
+
+enum SettingConfigItemDNSProxyResolveMode {
+  proxy(name: "proxy"),
+  direct(name: "direct"),
+  fakeip(name: "fakeip");
+
+  const SettingConfigItemDNSProxyResolveMode({required this.name});
+  final String name;
+}
+
+class SettingConfigItemDNS {
+  static const int kDNSServerMax = 10;
+  static const String kDNSIsp = "isp";
+  static const String kDNSUrl = "url";
+  static const String kDNSLocal =
+      "local"; //windows tun :do not use local,https://github.com/SagerNet/sing-box/issues/1592
+  static const String kDNSDHCP = "dhcp://auto"; //android
+  static const String kDNSTestDomain = "gstatic.com";
+  static const List<dynamic> kDNSList = [
+    //https://dns.iui.im/
+    {kDNSIsp: "Local", kDNSUrl: kDNSLocal},
+    {kDNSIsp: "DHCP", kDNSUrl: kDNSDHCP},
+    {kDNSIsp: "AliDNS", kDNSUrl: "udp://223.5.5.5"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "udp://223.6.6.6"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "tls://223.5.5.5"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "tls://223.6.6.6"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "tls://dns.alidns.com"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "https://223.5.5.5/dns-query"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "https://223.6.6.6/dns-query"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "https://dns.alidns.com/dns-query"},
+    {kDNSIsp: "AliDNS", kDNSUrl: "udp://[2400:3200::1]"},
+    {kDNSIsp: "DNSPod DNS", kDNSUrl: "tls://dot.pub"},
+    {kDNSIsp: "DNSPod DNS", kDNSUrl: "tls://dns.pub"},
+    {kDNSIsp: "DNSPod DNS", kDNSUrl: "https://1.12.12.12/dns-query"},
+    {kDNSIsp: "DNSPod DNS", kDNSUrl: "https://120.53.53.53/dns-query"},
+    {kDNSIsp: "DNSPod DNS", kDNSUrl: "https://doh.pub/dns-query"},
+    {kDNSIsp: "DNSPod DNS", kDNSUrl: "udp://[2402:4e00::]"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "udp://1.0.0.1"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "udp://1.1.1.1"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "tls://1.0.0.1"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "tls://1.1.1.1"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "https://1.0.0.1/dns-query"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "https://1.1.1.1/dns-query"},
+    {
+      kDNSIsp: "Cloudflare DNS",
+      kDNSUrl: "https://cloudflare-dns.com/dns-query",
+    },
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "udp://[2606:4700:4700::1111]"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "udp://[2606:4700:4700::1001]"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "tls://[2606:4700:4700::1111]"},
+    {kDNSIsp: "Cloudflare DNS", kDNSUrl: "tls://[2606:4700:4700::1001]"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "udp://8.8.8.8"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "udp://8.8.4.4"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "tls://8.8.8.8"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "tls://8.8.4.4"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "https://8.8.8.8/dns-query"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "https://8.8.4.4/dns-query"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "https://dns.google/dns-query"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "h3://8.8.4.4/dns-query"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "h3://8.8.8.8/dns-query"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "udp://[2001:4860:4860::8888]"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "udp://[2001:4860:4860::8844]"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "tls://[2001:4860:4860::8888]"},
+    {kDNSIsp: "Google DNS", kDNSUrl: "tls://[2001:4860:4860::8844]"},
+    {kDNSIsp: "TrafficRoute DNS", kDNSUrl: "udp://180.184.1.1"},
+    {kDNSIsp: "TrafficRoute DNS", kDNSUrl: "udp://180.184.2.2"},
+    {kDNSIsp: "OpenDNS", kDNSUrl: "udp://208.67.222.222"},
+    {kDNSIsp: "OpenDNS", kDNSUrl: "udp://208.67.220.220"},
+    {kDNSIsp: "Yandex DNS", kDNSUrl: "udp://77.88.8.1"},
+    {kDNSIsp: "Yandex DNS", kDNSUrl: "udp://77.88.8.8"},
+    {kDNSIsp: "Yandex DNS", kDNSUrl: "udp://dns.yandex.net"},
+    {kDNSIsp: "Yandex DNS", kDNSUrl: "udp://[2a02:6b8::feed:0ff]"},
+    {kDNSIsp: "Yandex DNS", kDNSUrl: "udp://[2a02:6b8:0:1::feed:0ff]"},
+    {kDNSIsp: "Comodo DNS", kDNSUrl: "udp://8.26.56.26"},
+    {kDNSIsp: "Comodo DNS", kDNSUrl: "udp://8.20.247.20"},
+    {kDNSIsp: "AdGuard DNS", kDNSUrl: "udp://94.140.14.14"},
+    {kDNSIsp: "AdGuard DNS", kDNSUrl: "udp://94.140.15.15"},
+    {kDNSIsp: "AdGuard DNS", kDNSUrl: "quic://dns.adguard.com"},
+    {kDNSIsp: "AdGuard DNS", kDNSUrl: "udp://[2a10:50c0::ad1:ff]"},
+    {kDNSIsp: "AdGuard DNS", kDNSUrl: "udp://[2a10:50c0::ad2:ff]"},
+  ];
+
+  Duration ttl = const Duration(hours: 12);
+  bool enableRule = false;
+  String testDomain = kDNSTestDomain;
+  bool enableClientSubnet = true;
+  bool enableInboundDomainResolve = false;
+  bool enableStaticIP = false;
+  bool enableStaticIPForResolver = true;
+  SettingConfigItemDNSProxyResolveMode proxyResolveMode =
+      SettingConfigItemDNSProxyResolveMode.fakeip;
+
+  List<String> _resolver = [];
+  List<String> _outbound = [];
+  List<String> _direct = [];
+  List<String> _proxy = [];
+
+  String clientSubnet = "";
+  String clientSubnetLatestUpdate = "";
+
+  Map<String, List<String>> staticIPs = {};
+  List<dynamic> list = [];
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'ttl': ttl.inSeconds,
+      'enable_rule': enableRule,
+      'test_domain': testDomain,
+      'enable_client_subnet': enableClientSubnet,
+      'enable_inbound_domain_resolve': enableInboundDomainResolve,
+      'enable_static_ip': enableStaticIP,
+      'enable_static_ip_for_resolver': enableStaticIPForResolver,
+      'proxy_resolve_mode': proxyResolveMode.name,
+      'resolver_addresses': _resolver,
+      'outbound_addresses': _outbound,
+      'direct_addresses': _direct,
+      'proxy_addresses': _proxy,
+      'client_subnet': clientSubnet,
+      'client_subnet_latest_update': clientSubnetLatestUpdate,
+      'static_ips': staticIPs,
+      'list': list,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    if (map["ttl"] != null) {
+      ttl = Duration(seconds: map["ttl"]);
+      if (ttl.inDays > 365) {
+        ttl = const Duration(days: 365);
+      }
+      if (ttl.inSeconds < 5) {
+        ttl = const Duration(seconds: 5);
+      }
+    }
+    enableRule = map["enable_rule"] ?? false;
+    testDomain = map["test_domain"] ?? "";
+    if (testDomain.isEmpty) {
+      testDomain = kDNSTestDomain;
+    }
+    enableClientSubnet = map["enable_client_subnet"] ?? true;
+    enableInboundDomainResolve = map["enable_inbound_domain_resolve"] ?? false;
+    enableStaticIP = map["enable_static_ip"] ?? false;
+    enableStaticIPForResolver = map["enable_static_ip_for_resolver"] ?? true;
+    String? proxyResolveMode_ = map["proxy_resolve_mode"];
+    if (proxyResolveMode_ == null) {
+      do {
+        bool enableFakeIp = map["enable_fake_ip"] ?? false;
+        if (enableFakeIp) {
+          proxyResolveMode = SettingConfigItemDNSProxyResolveMode.fakeip;
+          break;
+        }
+        bool enableProxyResolveByProxy =
+            map["enable_final_resolve_by_proxy"] ??
+            map["enable_proxy_resolve_by_proxy"] ??
+            true;
+        if (enableProxyResolveByProxy) {
+          proxyResolveMode = SettingConfigItemDNSProxyResolveMode.proxy;
+          break;
+        }
+      } while (false);
+    } else if (proxyResolveMode_ ==
+        SettingConfigItemDNSProxyResolveMode.proxy.name) {
+      proxyResolveMode = SettingConfigItemDNSProxyResolveMode.proxy;
+    } else if (proxyResolveMode_ ==
+        SettingConfigItemDNSProxyResolveMode.direct.name) {
+      proxyResolveMode = SettingConfigItemDNSProxyResolveMode.direct;
+    } else if (proxyResolveMode_ ==
+        SettingConfigItemDNSProxyResolveMode.fakeip.name) {
+      proxyResolveMode = SettingConfigItemDNSProxyResolveMode.fakeip;
+    } else {
+      proxyResolveMode = SettingConfigItemDNSProxyResolveMode.fakeip;
+    }
+
+    _resolver = ConvertUtils.getListStringFromDynamic(
+      map["resolver_addresses"],
+      true,
+      [],
+    )!;
+    _outbound = ConvertUtils.getListStringFromDynamic(
+      map["outbound_addresses"],
+      true,
+      [],
+    )!;
+    _direct = ConvertUtils.getListStringFromDynamic(
+      map["direct_addresses"],
+      true,
+      [],
+    )!;
+    _proxy = ConvertUtils.getListStringFromDynamic(
+      map["final_addresses"] ?? map["proxy_addresses"],
+      true,
+      [],
+    )!;
+
+    clientSubnet = map["client_subnet"] ?? "";
+    clientSubnetLatestUpdate = map["client_subnet_latest_update"] ?? "";
+    if (clientSubnet.isNotEmpty) {
+      if (!NetworkUtils.isIpv4(clientSubnet) &&
+          !NetworkUtils.isIpv6(clientSubnet)) {
+        clientSubnet = "";
+        clientSubnetLatestUpdate = "";
+      }
+    }
+    if (_resolver.isEmpty) {
+      var resolver = map["resolver"] ?? "";
+      if (resolver.isNotEmpty) {
+        _resolver.add(resolver);
+      }
+    }
+
+    if (_outbound.isEmpty) {
+      var outbound = map["outbound"] ?? "";
+      if (outbound.isNotEmpty) {
+        _outbound.add(outbound);
+      }
+    }
+    if (_direct.isEmpty) {
+      var direct = map["direct"] ?? "";
+      if (direct.isNotEmpty) {
+        _direct.add(direct);
+      }
+    }
+    if (_proxy.isEmpty) {
+      var proxy =
+          map["dns_proxy"] ??
+          TypeChecker<String>().check(map["proxy"]) ??
+          map["dns_remote"] ??
+          "";
+      if (proxy.isNotEmpty) {
+        _proxy.add(proxy);
+      }
+    }
+
+    if (Platform.isAndroid) {
+      _resolver.remove(SettingConfigItemDNS.kDNSDHCP);
+      _outbound.remove(SettingConfigItemDNS.kDNSDHCP);
+      _direct.remove(SettingConfigItemDNS.kDNSDHCP);
+      _proxy.remove(SettingConfigItemDNS.kDNSDHCP);
+    }
+    var dips = map["static_ips"] ?? {};
+    var dl = map["list"] ?? map["dns_list"] ?? [];
+
+    for (var i in dl) {
+      if (i is Map) {
+        var isp = i[kDNSIsp];
+        var addr = i[kDNSUrl];
+        if (isp is String && addr is String) {
+          Uri? uri = Uri.tryParse(addr);
+          if (uri != null && isDNSValidScheme(uri.scheme)) {
+            list.add({kDNSIsp: isp, kDNSUrl: addr});
+          }
+        }
+      }
+    }
+    dips.forEach((key, value) {
+      var list = ConvertUtils.getListStringFromDynamic(value, true, [])!;
+      if (list.isNotEmpty) {
+        staticIPs[key] = list;
+      }
+    });
+  }
+
+  static SettingConfigItemDNS fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemDNS config = SettingConfigItemDNS();
+    config.fromJson(map);
+    return config;
+  }
+
+  static bool isDNSValidScheme(String scheme) {
+    return ["udp", "tcp", "tls", "https", "quic", "h3"].contains(scheme);
+  }
+
+  static bool containsDNSURL(String url) {
+    for (var dns in kDNSList) {
+      var addr = dns[kDNSUrl];
+      if (addr == url) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void setResolverDns(List<String> dns) {
+    _resolver = dns;
+  }
+
+  void setOutboundDns(List<String> dns) {
+    _outbound = dns;
+  }
+
+  void setDirectDns(List<String> dns) {
+    _direct = dns;
+  }
+
+  void setProxyDns(List<String> dns) {
+    _proxy = dns;
+  }
+
+  void addOrRemoveResolverDns(String dns, bool add) {
+    if (add) {
+      _resolver.add(dns);
+    } else {
+      _resolver.remove(dns);
+    }
+  }
+
+  void addOrRemoveOutboundDns(String dns, bool add) {
+    if (add) {
+      _outbound.add(dns);
+    } else {
+      _outbound.remove(dns);
+    }
+  }
+
+  void addOrRemoveDirectDns(String dns, bool add) {
+    if (add) {
+      _direct.add(dns);
+    } else {
+      _direct.remove(dns);
+    }
+  }
+
+  void addOrRemoveProxyDns(String dns, bool add) {
+    if (add) {
+      _proxy.add(dns);
+    } else {
+      _proxy.remove(dns);
+    }
+  }
+
+  List<String> getOutboundDns(String regioncode, bool tunMode) {
+    if (_outbound.isNotEmpty) {
+      return _updateDns(_outbound, tunMode);
+    }
+
+    _outbound.add(SettingConfigItemDNS.kDNSLocal);
+    if (!Platform.isAndroid) {
+      _outbound.add(SettingConfigItemDNS.kDNSDHCP);
+    }
+    _outbound.add("udp://8.8.8.8");
+    _outbound.add("udp://8.8.4.4");
+    if (regioncode.toLowerCase() == "cn") {
+      _outbound.add("udp://223.6.6.6");
+    }
+    return _updateDns(_outbound, tunMode);
+  }
+
+  List<String> getDirectDns(String regioncode, bool tunMode) {
+    if (_direct.isNotEmpty) {
+      return _updateDns(_direct, tunMode);
+    }
+
+    _direct.add(SettingConfigItemDNS.kDNSLocal);
+    if (!Platform.isAndroid) {
+      _direct.add(SettingConfigItemDNS.kDNSDHCP);
+    }
+    _direct.add("udp://8.8.8.8");
+    _direct.add("udp://8.8.4.4");
+    if (regioncode.toLowerCase() == "cn") {
+      _direct.add("udp://223.6.6.6");
+    }
+
+    return _updateDns(_direct, tunMode);
+  }
+
+  List<String> getProxyDns(String regioncode, bool tunMode) {
+    if (_proxy.isNotEmpty) {
+      return _updateDns(_proxy, tunMode);
+    }
+
+    _proxy.add("https://1.1.1.1/dns-query");
+    _proxy.add("https://8.8.8.8/dns-query");
+    _proxy.add("https://dns.google/dns-query");
+
+    return _updateDns(_proxy, tunMode);
+  }
+
+  List<String> getResolverDns(String regioncode, bool tunMode) {
+    if (_resolver.isNotEmpty) {
+      return _updateDns(_resolver, tunMode);
+    }
+
+    _resolver.add(SettingConfigItemDNS.kDNSLocal);
+    if (!Platform.isAndroid) {
+      _resolver.add(SettingConfigItemDNS.kDNSDHCP);
+    }
+    _resolver.add("https://1.1.1.1/dns-query");
+    _resolver.add("https://8.8.8.8/dns-query");
+    if (regioncode.toLowerCase() == "cn") {
+      _resolver.add("udp://223.6.6.6");
+    }
+    return _updateDns(_resolver, tunMode);
+  }
+
+  List<String> _updateDns(List<String> dns, bool tunMode) {
+    List<String> newDns = dns.toList();
+    if (Platform.isAndroid) {
+      bool has = newDns.contains(SettingConfigItemDNS.kDNSLocal);
+      newDns.remove(SettingConfigItemDNS.kDNSDHCP);
+      if (!has && newDns.isEmpty) {
+        newDns.add(SettingConfigItemDNS.kDNSLocal);
+      }
+    }
+    return newDns;
+  }
+}
+
+class SettingConfigItemTLS {
+  static String kFragmentSize = "100-200"; //[1,256]
+  static String kFragmentSleep = "10-20"; //[0,1000],0:disable
+  static String kPaddingSize = "1-1500";
+  bool enableInsecure = true;
+  bool enableFragment = false;
+  String fragmentSize = SettingConfigItemTLS.kFragmentSize;
+  String fragmentSleep = SettingConfigItemTLS.kFragmentSleep;
+
+  bool enableMixedCaseSNI = false;
+
+  bool enablePadding = false;
+  String paddingSize = SettingConfigItemTLS.kPaddingSize;
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'enable_insecure': enableInsecure,
+      'enable_fragment': enableFragment,
+      'fragment_size': fragmentSize,
+      'fragment_sleep': fragmentSleep,
+      'enable_mixed_case_sni': enableMixedCaseSNI,
+      'enable_padding': enablePadding,
+      'padding_size': paddingSize,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    enableInsecure = map["enable_insecure"] ?? true;
+    enableFragment = map["enable_fragment"] ?? false;
+    fragmentSize = map["fragment_size"] ?? SettingConfigItemTLS.kFragmentSize;
+    fragmentSleep =
+        map["fragment_sleep"] ?? SettingConfigItemTLS.kFragmentSleep;
+    enableMixedCaseSNI = map["enable_mixed_case_sni"] ?? false;
+    enablePadding = map["enable_padding"] ?? false;
+    paddingSize = map["padding_size"] ?? SettingConfigItemTLS.kPaddingSize;
+  }
+
+  static SettingConfigItemTLS fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemTLS config = SettingConfigItemTLS();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemMux {
+  bool enable = false;
+  bool padding = false;
+  String protocol = "h2mux";
+  int? maxConnections;
+  int? minStream = 1;
+  int? maxStream = 8;
+
+  SingboxOutboundMultiplexBrutalOptions? brutal;
+  List<String> outboundTypes = []; //vmess,vless,trojan,shadowsocks
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'enable': enable,
+      'padding': padding,
+      'protocol': protocol,
+      'max_connections': maxConnections,
+      'max_streams': maxStream,
+      'min_streams': minStream,
+      'brutal': brutal?.toJson(),
+      'outbound_types': outboundTypes,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    enable = map["enable"] ?? false;
+    padding = map["padding"] ?? false;
+    protocol = map["protocol"] ?? "";
+    if (protocol.isEmpty) {
+      protocol = "h2mux";
+    }
+    maxConnections = map["max_connections"];
+    minStream = map["min_streams"];
+    maxStream = map["max_streams"];
+    brutal = SingboxOutboundMultiplexBrutalOptions.fromJsonStatic(
+      map["brutal"],
+    );
+    outboundTypes = ConvertUtils.getListStringFromDynamic(
+      map["outbound_types"],
+      true,
+      [],
+    )!;
+  }
+
+  static SettingConfigItemMux fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemMux config = SettingConfigItemMux();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+class SettingConfigItemProxy {
+  static const String hostLocal = '127.0.0.1';
+  static const String hostNetwork = '0.0.0.0';
+
+  static int controlPortDefault = 3057;
+  static int kMixedDirectPortDefault = 3065;
+  static int kMixedForwardPortDefault = 3066;
+  static int kMixedPortDefault = 3067;
+
+  static int mixedDirectNetSharePortDefault = 4065;
+  static int kMixedForwardNetSharePortDefault = 4066;
+  static int kMixedNetSharePortDefault = 4067;
+  static int clusterPortDefault = 3050;
+
+  String host = hostLocal;
+  bool enableCluster = false;
+  String clusterHost = hostLocal;
+  String clusterSecret = "";
+  int mixedRulePort = kMixedPortDefault;
+  int mixedDirectPort = kMixedDirectPortDefault;
+  int mixedForwardPort = kMixedForwardPortDefault;
+  int mixedRuleNetSharePort = kMixedNetSharePortDefault;
+  int mixedForwardNetSharePort = kMixedForwardNetSharePortDefault;
+  int controlPort = controlPortDefault;
+  int clusterPort = clusterPortDefault;
+  bool autoSetSystemProxy = getAutoSetSystemProxyDefault();
+  bool bypassSystemProxy = true;
+  List<String> systemProxyBypassDomain = ProxyBypassDoaminsDefault.toList();
+  bool disconnectWhenQuit = getDisconnectWhenQuitDefault();
+  bool autoAddToFirewall = true;
+  String socksLocalUsername = "";
+  String socksLocalPassword = "";
+  String socksUsername = "";
+  String socksPassword = "";
+
+  String getsocksLocalProxyUrl(int port) {
+    String auth = "";
+    if (socksLocalUsername.isNotEmpty && socksLocalPassword.isNotEmpty) {
+      auth = "$socksLocalUsername:$socksLocalPassword@";
+    }
+    return "PROXY ${auth}127.0.0.1:$port";
+  }
+
+  void setAllowAllInbounds(bool allow) {
+    host = allow ? hostNetwork : hostLocal;
+  }
+
+  bool getAllowAllInbounds() {
+    return host == hostNetwork;
+  }
+
+  void setClusterAllowAllInbounds(bool allow) {
+    clusterHost = allow ? hostNetwork : hostLocal;
+  }
+
+  bool getClusterAllowAllInbounds() {
+    return clusterHost == hostNetwork;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'host': host,
+    'enable_cluster': enableCluster,
+    'cluster_host': clusterHost,
+    'cluster_secret': clusterSecret,
+    'mixed_port': mixedRulePort,
+    'mixed_direct_port': mixedDirectPort,
+    'mixed_forword_port': mixedForwardPort,
+    'mixed_net_share_port': mixedRuleNetSharePort,
+    'mixed_forword_net_share_port': mixedForwardNetSharePort,
+    'control_port': controlPort,
+    'cluster_port': clusterPort,
+    'auto_set_system_proxy': autoSetSystemProxy,
+    'bypass_system_proxy': bypassSystemProxy,
+    'system_proxy_bypass_domain': systemProxyBypassDomain,
+    'disconnect_when_quit': disconnectWhenQuit,
+    'auto_add_to_firewall': autoAddToFirewall,
+    'socks_local_username': socksLocalUsername,
+    'socks_local_password': socksLocalPassword,
+    'socks_username': socksUsername,
+    'socks_password': socksPassword,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    host = map["host"] ?? hostLocal;
+    enableCluster = map["enable_cluster"] ?? false;
+    clusterHost = map["cluster_host"] ?? hostLocal;
+    clusterSecret = map["cluster_secret"] ?? "";
+    mixedRulePort = map["mixed_port"] ?? 0;
+    mixedDirectPort = map["mixed_direct_port"] ?? 0;
+    mixedForwardPort = map["mixed_forword_port"] ?? 0;
+    mixedRuleNetSharePort = map["mixed_net_share_port"] ?? 0;
+    mixedForwardNetSharePort = map["mixed_forword_net_share_port"] ?? 0;
+    controlPort = map["control_port"] ?? 0;
+    clusterPort = map["cluster_port"] ?? 0;
+
+    if (mixedRulePort == 0) {
+      mixedRulePort = kMixedPortDefault;
+    }
+    if (mixedDirectPort == 0) {
+      mixedDirectPort = kMixedDirectPortDefault;
+    }
+    if (mixedForwardPort == 0) {
+      mixedForwardPort = kMixedForwardPortDefault;
+    }
+    if (mixedRuleNetSharePort == 0) {
+      mixedRuleNetSharePort = kMixedNetSharePortDefault;
+    }
+    if (mixedForwardNetSharePort == 0 ||
+        mixedForwardNetSharePort == mixedForwardPort) {
+      mixedForwardNetSharePort = kMixedForwardNetSharePortDefault;
+    }
+    if (controlPort == 0) {
+      controlPort = controlPortDefault;
+    }
+    if (clusterPort == 0) {
+      clusterPort = clusterPortDefault;
+    }
+    autoSetSystemProxy =
+        map["auto_set_system_proxy"] ?? getAutoSetSystemProxyDefault();
+    bypassSystemProxy = map["bypass_system_proxy"] ?? true;
+    systemProxyBypassDomain = ConvertUtils.getListStringFromDynamic(
+      map["system_proxy_bypass_domain"],
+      true,
+      ProxyBypassDoaminsDefault.toList(),
+    )!;
+    disconnectWhenQuit =
+        map["disconnect_when_quit"] ?? getDisconnectWhenQuitDefault();
+    autoAddToFirewall = map["auto_add_to_firewall"] ?? true;
+    socksLocalUsername = map["socks_local_username"] ?? "";
+    socksLocalPassword = map["socks_local_password"] ?? "";
+    socksUsername = map["socks_username"] ?? "";
+    socksPassword = map["socks_password"] ?? "";
+  }
+
+  static SettingConfigItemProxy fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemProxy config = SettingConfigItemProxy();
+    config.fromJson(map);
+    return config;
+  }
+
+  static bool getAutoSetSystemProxyDefault() {
+    if (Platform.isWindows || Platform.isLinux) {
+      return true;
+    }
+    return false;
+  }
+
+  static bool getDisconnectWhenQuitDefault() {
+    if (Platform.isWindows || Platform.isLinux) {
+      return true;
+    }
+    return false;
+  }
+}
+
+class SettingConfigItemRuleSets {
+  bool enableGeoSite = true;
+  bool enableGeoIp = true;
+  bool enableAcl = true;
+  bool autoAppendRegionGeoSite = true;
+  bool autoAppendRegionGeoIp = true;
+  bool useRemoteGeoSite = false;
+  bool useRemoteGeoIp = false;
+  bool useRemoteAcl = false;
+  Duration updateInterval = const Duration(hours: 24);
+  bool disableCustomDiversionGroup = false;
+  bool disableISPDiversionGroup = true;
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'enable_geosite': enableGeoSite,
+      'enable_geoip': enableGeoIp,
+      'enable_acl': enableAcl,
+      'auto_append_region_geosite': autoAppendRegionGeoSite,
+      'auto_append_region_geoip': autoAppendRegionGeoIp,
+      'use_remote_geosite': useRemoteGeoSite,
+      'use_remote_geoip': useRemoteGeoIp,
+      'use_remote_acl': useRemoteAcl,
+      'update_interval': updateInterval.inSeconds,
+      'disable_custom_diversion_group': disableCustomDiversionGroup,
+      'disable_isp_diversion_group': disableISPDiversionGroup,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map, String regionCode) {
+    if (map == null) {
+      return;
+    }
+
+    enableGeoSite =
+        map["enable_geosite"] ?? getEnableGeositeDefault(regionCode);
+    enableGeoIp = map["enable_geoip"] ?? true;
+    enableAcl = map["enable_acl"] ?? true;
+    autoAppendRegionGeoSite = map["auto_append_region_geosite"] ?? true;
+    autoAppendRegionGeoIp = map["auto_append_region_geoip"] ?? true;
+    useRemoteGeoSite = map["use_remote_geosite"] ?? false;
+    useRemoteGeoIp = map["use_remote_geoip"] ?? false;
+    useRemoteAcl = map["use_remote_acl"] ?? false;
+    if (map["update_interval"] != null) {
+      updateInterval = Duration(seconds: map["update_interval"]);
+      if (updateInterval.inHours < 1) {
+        updateInterval = const Duration(hours: 1);
+      }
+    }
+
+    disableCustomDiversionGroup =
+        map["disable_custom_diversion_group"] ?? false;
+    disableISPDiversionGroup = map["disable_isp_diversion_group"] ?? true;
+  }
+
+  static SettingConfigItemRuleSets fromJsonStatic(
+    Map<String, dynamic>? map,
+    String regioncode,
+  ) {
+    SettingConfigItemRuleSets config = SettingConfigItemRuleSets();
+    config.fromJson(map, regioncode);
+    return config;
+  }
+
+  static List<String> getGeoSiteDataRegionCodes() {
+    return ["af", "br", "cn", "id", "ru", "ir", "tr"];
+  }
+
+  static bool hasGeoSiteData(String regioncode) {
+    regioncode = regioncode.toLowerCase();
+    var codes = getGeoSiteDataRegionCodes();
+    if (codes.contains(regioncode)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  static bool getEnableGeositeDefault(String regioncode) {
+    if (regioncode.isEmpty) {
+      return true;
+    }
+
+    return hasGeoSiteData(regioncode);
+  }
+}
+
+class SettingConfigItemPerapp {
+  bool enable = true;
+  bool isInclude = true; //android
+  List<String> _listAndroid = [];
+  List<String> _listMacos = [];
+  bool hideSystemApp = true;
+  bool hideAppIcon = false;
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'enable': enable,
+      'is_include': isInclude,
+      'list_android': _listAndroid,
+      'list_macos': _listMacos,
+      'hide_system_app': hideSystemApp,
+      'hide_app_icon': hideAppIcon,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    enable = map["enable"] ?? map["perapp_enable"] ?? true;
+    isInclude = map["is_include"] ?? map["perapp_is_include"] ?? true;
+    _listAndroid = ConvertUtils.getListStringFromDynamic(
+      map["list_android"],
+      true,
+      [],
+    )!;
+    _listMacos = ConvertUtils.getListStringFromDynamic(
+      map["list_macos"],
+      true,
+      [],
+    )!;
+    if (_listAndroid.isEmpty) {
+      _listAndroid = ConvertUtils.getListStringFromDynamic(
+        map["list"] ?? map["perapp"],
+        true,
+        [],
+      )!;
+      _listAndroid.removeWhere((element) => element == AppUtils.getId());
+    }
+
+    hideSystemApp = map["hide_system_app"] ?? true;
+    hideAppIcon = map["hide_app_icon"] ?? false;
+  }
+
+  static SettingConfigItemPerapp fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemPerapp config = SettingConfigItemPerapp();
+    config.fromJson(map);
+    return config;
+  }
+
+  List<String> get list {
+    if (Platform.isAndroid) {
+      return _listAndroid;
+    } else if (Platform.isMacOS) {
+      return _listMacos;
+    }
+    return [];
+  }
+
+  set list(List<String> list) {
+    if (Platform.isAndroid) {
+      _listAndroid = list;
+    } else if (Platform.isMacOS) {
+      _listMacos = list;
+    }
+  }
+}
+
+class SettingConfigItemAutoSelect {
+  Duration interval = const Duration(hours: 8);
+  Duration tolerance = const Duration(milliseconds: 0);
+  bool prioritizeMyFav = false;
+  bool filter = false;
+  int limitedNum = 2000;
+  Duration? selectedHealthCheckInterval;
+  bool reTestIfNetworkUpdate = false;
+  bool updateCurrentServerAfterManualUrltest = true;
+  bool autoSelectServerIgnorePerProxyServer = false;
+
+  Map<String, dynamic> toJson() {
+    Map<String, dynamic> ret = {
+      'interval': interval.inSeconds,
+      'tolerance': tolerance.inMilliseconds,
+      'prioritize_my_fav': prioritizeMyFav,
+      'filter': filter,
+      'limited_num': limitedNum,
+      'selected_health_check_interval': selectedHealthCheckInterval?.inSeconds,
+      'retest_if_network_udpate': reTestIfNetworkUpdate,
+      'update_current_server_after_manual_urltest':
+          updateCurrentServerAfterManualUrltest,
+      'ignore_perproxy_server': autoSelectServerIgnorePerProxyServer,
+    };
+    return ret;
+  }
+
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+    if (map["interval"] != null) {
+      interval = Duration(seconds: map["interval"]);
+      if (interval.inDays > 365) {
+        interval = const Duration(days: 365);
+      }
+      if (interval.inSeconds < 5) {
+        interval = const Duration(seconds: 5);
+      }
+    }
+    if (map["tolerance"] != null) {
+      tolerance = Duration(milliseconds: map["tolerance"]);
+      if (tolerance.inSeconds > 5) {
+        tolerance = const Duration(seconds: 5);
+      }
+      if (tolerance.inMilliseconds < 0) {
+        tolerance = const Duration(milliseconds: 0);
+      }
+    }
+
+    prioritizeMyFav = map["prioritize_my_fav"] ?? false;
+    filter = map["filter"] ?? false;
+    final limitedNum_ = map["limited_num"] ?? 2000;
+    if (limitedNum_ is int) {
+      limitedNum = limitedNum_;
+      if (limitedNum > 100000) {
+        limitedNum = 100000;
+      }
+    }
+
+    if (map["selected_health_check_interval"] != null) {
+      selectedHealthCheckInterval = Duration(
+        seconds: map["selected_health_check_interval"],
+      );
+      if (selectedHealthCheckInterval!.inSeconds >= 3600) {
+        selectedHealthCheckInterval = const Duration(minutes: 59);
+      }
+      if (selectedHealthCheckInterval!.inSeconds < 3) {
+        selectedHealthCheckInterval = const Duration(seconds: 3);
+      }
+    }
+    reTestIfNetworkUpdate = map["retest_if_network_udpate"] ?? false;
+    updateCurrentServerAfterManualUrltest =
+        map["update_current_server_after_manual_urltest"] ?? true;
+    autoSelectServerIgnorePerProxyServer =
+        map["ignore_perproxy_server"] ?? false;
+  }
+
+  static SettingConfigItemAutoSelect fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfigItemAutoSelect config = SettingConfigItemAutoSelect();
+    config.fromJson(map);
+    return config;
+  }
+}
+
+enum DNSType { dnsTypeResolver, dnsTypeOutbound, dnsTypeDirect, dnsTypeProxy }
+
+enum IPStrategy {
+  ipv4Only(name: "ipv4_only"),
+  preferIPv4(name: "prefer_ipv4"),
+  preferIPv6(name: "prefer_ipv6"),
+  ipv6Only(name: "ipv6_only");
+
+  const IPStrategy({required this.name});
+  final String name;
+}
+
+class SettingConfig {
+  static const Duration kMaxDays = Duration(days: 21);
+  static int htmlBoardPortDefault = 3072;
+  static const String kCoreVersion = "1.14.0";
+  static const List<String> kSpeedTestList = [
+    "https://speed.cloudflare.com/",
+    "https://speedtest.net/",
+    "https://ipcheck.ing/",
+    "https://web1.cachefly.net/speedtest/index.html",
+  ];
+  static const List<String> kUrlTestList = [
+    "https://www.gstatic.com/generate_204",
+    "http://www.msftconnecttest.com/connecttest.txt",
+    "http://cp.cloudflare.com/generate_204",
+    "https://checkip.amazonaws.com",
+    "http://connectivity-check.ubuntu.com",
+    "http://detectportal.firefox.com/success.txt",
+  ];
+
+  static const List<String> kUserAgentList = [
+    "mihomo/1.19.28",
+    "clash-verge",
+    "FLClash",
+    "mihomo.party/v2.0.0 (clash.meta)",
+    "ClashMeta",
+    "v2ray",
+    "sing-box $kCoreVersion",
+    "NekoBox/Android/1.4.1 (Prefer ClashMeta Format)",
+    "HiddifyNext",
+  ];
+  static const Map<String, String> kUserAgentListOldUpgrade = {
+    "sing-box": "sing-box $kCoreVersion",
+    "mihomo/1.19.9": "mihomo/1.19.28",
+    "mihomo/1.19.12": "mihomo/1.19.28",
+    "mihomo/1.19.16": "mihomo/1.19.28",
+    "mihomo/1.19.23": "mihomo/1.19.28",
+    "mihomo/1.19.27": "mihomo/1.19.28",
+    "NekoBox/Android/1.3.1 (Prefer ClashMeta Format)":
+        "NekoBox/Android/1.4.1 (Prefer ClashMeta Format)",
+    "NekoBox/Android/1.3.4 (Prefer ClashMeta Format)":
+        "NekoBox/Android/1.4.1 (Prefer ClashMeta Format)",
+  };
+
+  String languageTag = "";
+  String regionCode = "";
+  bool novice = false;
+
+  SettingConfigItemDev dev = SettingConfigItemDev();
+  SettingConfigItemUI ui = SettingConfigItemUI();
+  SettingConfigItemUIScreen uiScreen = SettingConfigItemUIScreen();
+  SettingConfigItemWindow window = SettingConfigItemWindow();
+  SettingConfigItemProxy proxy = SettingConfigItemProxy();
+  SettingConfigItemNTP ntp = SettingConfigItemNTP();
+  SettingConfigItemTUN tun = SettingConfigItemTUN();
+  SettingConfigItemDNS dns = SettingConfigItemDNS();
+  SettingConfigItemTLS tls = SettingConfigItemTLS();
+  SettingConfigItemMux mux = SettingConfigItemMux();
+  SettingConfigItemRuleSets ruleSets = SettingConfigItemRuleSets();
+  SettingConfigItemPerapp perapp = SettingConfigItemPerapp();
+  SettingConfigItemAutoSelect autoSelect = SettingConfigItemAutoSelect();
+  SettingConfigItemUICloudflareWarp warp = SettingConfigItemUICloudflareWarp();
+  SettingConfigItemWebDev webdav = SettingConfigItemWebDev();
+  SettingConfigItemAutobackup autoBackup = SettingConfigItemAutobackup();
+  SettingConfigItemStatistics statistics = SettingConfigItemStatistics();
+
+  bool autoConnectAfterLaunch = true;
+  bool autoConnectAtBoot = false; //android
+  List<String> allowedSenderPackages = []; //android
+  IPStrategy ipStrategy = IPStrategy.ipv4Only;
+  bool proxyAll = false;
+  List<String> chainProxy = [];
+  bool front = true;
+  bool privateDirect = true;
+  bool quitWhenSwitchSystemUser = false;
+  bool alwayOn = false;
+  Duration? disconnectAfterSleep;
+  bool disableAppImproveData = false;
+
+  List<String> userAgents = [];
+  List<String> speedTestList = [];
+  String speedTest = kSpeedTestList[0];
+  List<String> urlTestList = [];
+  String urlTest = kUrlTestList[0];
+  int urlTestTimeout = 15;
+  int latencyCheckConcurrency = maxLatencyCheckConcurrency();
+  bool latencyCheckResoveIP = false;
+
+  String autoUpdateChannel = "stable"; //stable, beta
+  bool checkByProxy = false;
+  bool autoDownloadUpdatePkg = true;
+  String originSBProfile = "";
+  int htmlBoardPort = htmlBoardPortDefault;
+
+  Map<String, dynamic> toJson() => {
+    'language_tag': languageTag,
+    'region_code': regionCode,
+    'novice': novice,
+    'ui': ui,
+    'dev': dev,
+    'ui_screen': uiScreen,
+    'window': window,
+    'ntp': ntp,
+    'proxy': proxy,
+    'tun': tun,
+    'dns': dns,
+    'tls': tls,
+    'mux': mux,
+    'rule_sets': ruleSets,
+    'perapp': perapp,
+    'auto_select': autoSelect,
+    'warp': warp,
+    'webdav': webdav,
+    'auto_backup': autoBackup,
+    'statistics': statistics,
+    'auto_connect_after_launch': autoConnectAfterLaunch,
+    'auto_connect_at_boot': autoConnectAtBoot,
+    'allowed_sender_packages': allowedSenderPackages,
+    'ip_strategy': ipStrategy.name,
+    'proxy_all': proxyAll,
+    'chain_proxy': chainProxy,
+    'front': front,
+    'private_direct': privateDirect,
+    'quit_when_switch_systemUser': quitWhenSwitchSystemUser,
+    'alway_on': alwayOn,
+    'disconnect_after_sleep_seconds': disconnectAfterSleep?.inSeconds,
+    'disable_app_improve_data': disableAppImproveData,
+    'user_agents': userAgents,
+    'speed_test_list': speedTestList,
+    'speed_test': speedTest,
+    'url_test_list': urlTestList,
+    'url_test_timeout': urlTestTimeout,
+    'url_test': urlTest,
+    'latency_check_concurrency': latencyCheckConcurrency,
+    'latency_check_resolve_ip': latencyCheckResoveIP,
+    'auto_update_channel': autoUpdateChannel,
+    'check_by_proxy': checkByProxy,
+    'auto_download_udpate_pkg': autoDownloadUpdatePkg,
+    'origin_sb_profile': originSBProfile,
+    'html_board_port': htmlBoardPort,
+  };
+  void fromJson(Map<String, dynamic>? map) {
+    if (map == null) {
+      return;
+    }
+
+    languageTag = map["language_tag"] ?? "";
+    regionCode = map["region_code"] ?? "";
+    novice = map["novice"] ?? false;
+
+    ui = SettingConfigItemUI.fromJsonStatic(map["ui"]);
+    dev = SettingConfigItemDev.fromJsonStatic(map["dev"]);
+    uiScreen = SettingConfigItemUIScreen.fromJsonStatic(
+      map["ui_screen"] ?? map,
+    );
+    window = SettingConfigItemWindow.fromJsonStatic(map["window"]);
+    if (map["ntp"] is Map) {
+      ntp = SettingConfigItemNTP.fromJsonStatic(map["ntp"]);
+    } else {
+      ntp.enable = map["ntp"] ?? false;
+    }
+
+    proxy = SettingConfigItemProxy.fromJsonStatic(map["proxy"]);
+    if (map["tun"] is Map) {
+      tun = SettingConfigItemTUN.fromJsonStatic(map["tun"]);
+    } else {
+      tun = SettingConfigItemTUN.fromJsonStatic(map);
+    }
+    dns = SettingConfigItemDNS.fromJsonStatic(map["dns"] ?? map);
+    tls = SettingConfigItemTLS.fromJsonStatic(map["tls"]);
+    mux = SettingConfigItemMux.fromJsonStatic(map["mux"]);
+    ruleSets = SettingConfigItemRuleSets.fromJsonStatic(
+      map["rule_sets"] ?? map,
+      regionCode,
+    );
+    if (map["perapp"] is Map) {
+      perapp = SettingConfigItemPerapp.fromJsonStatic(map["perapp"]);
+    } else {
+      perapp = SettingConfigItemPerapp.fromJsonStatic(map);
+    }
+    autoSelect = SettingConfigItemAutoSelect.fromJsonStatic(
+      map["auto_select"] ?? map,
+    );
+    warp = SettingConfigItemUICloudflareWarp.fromJsonStatic(map["warp"] ?? map);
+    webdav = SettingConfigItemWebDev.fromJsonStatic(map["webdav"]);
+    autoBackup = SettingConfigItemAutobackup.fromJsonStatic(map["auto_backup"]);
+    statistics = SettingConfigItemStatistics.fromJsonStatic(map["statistics"]);
+
+    autoConnectAfterLaunch = map["auto_connect_after_launch"] ?? true;
+    autoConnectAtBoot = map["auto_connect_at_boot"] ?? true;
+    allowedSenderPackages = ConvertUtils.getListStringFromDynamic(
+      map["allowed_sender_packages"],
+      true,
+      [],
+    )!;
+
+    var name = map["ip_strategy"];
+    if (name != null) {
+      if (name == IPStrategy.ipv4Only.name) {
+        ipStrategy = IPStrategy.ipv4Only;
+      } else if (name == IPStrategy.preferIPv4.name) {
+        ipStrategy = IPStrategy.preferIPv4;
+      } else if (name == IPStrategy.preferIPv6.name) {
+        ipStrategy = IPStrategy.preferIPv6;
+      } else if (name == IPStrategy.ipv6Only.name) {
+        ipStrategy = IPStrategy.ipv6Only;
+      } else {
+        ipStrategy = IPStrategy.ipv4Only;
+      }
+    } else {
+      ipStrategy = map["enable_ipv6"] == true
+          ? IPStrategy.preferIPv4
+          : IPStrategy.ipv4Only;
+    }
+
+    proxyAll = map["proxy_all"] ?? false;
+    var chainProxy_ = map["chain_proxy"] ?? map["front_proxy"];
+    if (chainProxy_ is String) {
+      if (chainProxy_.isNotEmpty) {
+        chainProxy.add(chainProxy_);
+      }
+    } else {
+      chainProxy = ConvertUtils.getListStringFromDynamic(
+        chainProxy_,
+        true,
+        [],
+      )!;
+    }
+    front = map["front"] ?? true;
+
+    privateDirect = map["private_direct"] ?? true;
+    quitWhenSwitchSystemUser = map["quit_when_switch_systemUser"] ?? false;
+    alwayOn = map["alway_on"] ?? false;
+
+    if (map["disconnect_after_sleep_seconds"] != null) {
+      disconnectAfterSleep = Duration(
+        seconds: map["disconnect_after_sleep_seconds"],
+      );
+      if (disconnectAfterSleep!.inSeconds < 30) {
+        disconnectAfterSleep = const Duration(seconds: 30);
+      }
+      if (disconnectAfterSleep!.inHours > 12) {
+        disconnectAfterSleep = const Duration(hours: 12);
+      }
+    }
+
+    disableAppImproveData =
+        map["disable_app_improve_data"] ?? map["disable_ua_report"] ?? false;
+    speedTestList = ConvertUtils.getListStringFromDynamic(
+      map["speed_test_list"],
+      true,
+      [],
+    )!;
+    userAgents = ConvertUtils.getListStringFromDynamic(
+      map["user_agents"],
+      true,
+      [],
+    )!;
+
+    speedTest = map["speed_test"] ?? "";
+    if (speedTest.isEmpty) {
+      speedTest = kSpeedTestList[0];
+    }
+
+    urlTestList = ConvertUtils.getListStringFromDynamic(
+      map["url_test_list"],
+      true,
+      [],
+    )!;
+    urlTestTimeout = map["url_test_timeout"] ?? 15;
+    if (urlTestTimeout < 1) {
+      urlTestTimeout = 1;
+    }
+    if (urlTestTimeout > 15) {
+      urlTestTimeout = 15;
+    }
+
+    urlTest = map["url_test"] ?? "";
+    if (urlTest.isEmpty) {
+      urlTest = kUrlTestList[0];
+    }
+    latencyCheckConcurrency =
+        map["latency_check_concurrency"] ?? maxLatencyCheckConcurrency();
+    if (latencyCheckConcurrency < 0 ||
+        latencyCheckConcurrency > maxLatencyCheckConcurrency()) {
+      latencyCheckConcurrency = maxLatencyCheckConcurrency();
+    }
+
+    latencyCheckResoveIP =
+        map["latency_check_resolve_ip"] ??
+        map["latency_check_resove_ip"] ??
+        false;
+
+    autoUpdateChannel = map["auto_update_channel"] ?? "stable";
+    if (autoUpdateChannel.isEmpty) {
+      autoUpdateChannel = Random().nextInt(10) < 5 ? "beta" : "stable";
+    }
+    checkByProxy =
+        map["check_by_proxy"] ?? map["update_when_connected"] ?? false;
+    autoDownloadUpdatePkg = map["auto_download_udpate_pkg"] ?? true;
+    originSBProfile = map["origin_sb_profile"] ?? "";
+    htmlBoardPort = map["html_board_port"] ?? htmlBoardPortDefault;
+  }
+
+  static SettingConfig fromJsonStatic(Map<String, dynamic>? map) {
+    SettingConfig config = SettingConfig();
+    config.fromJson(map);
+    return config;
+  }
+
+  void reset() {
+    var map = toJson();
+    removeNotMap(map);
+    final webdav_ = webdav;
+    final warp_ = warp;
+    map["language_tag"] = languageTag;
+    map["region_code"] = regionCode;
+    fromJson(map);
+    webdav = webdav_;
+    warp = warp_;
+  }
+
+  country.Country currentCountry() {
+    final data = country.Countries.values.where((country) {
+      if (country.alpha2 == regionCode) {
+        return true;
+      }
+
+      return false;
+    }).toList();
+    if (data.isEmpty) {
+      return country.Countries.values.first;
+    }
+    return data[0];
+  }
+
+  static String languageTagForCountry() {
+    return LocaleSettings.currentLocale.languageTag.replaceAll("-", "_");
+  }
+
+  static int maxLatencyCheckConcurrency() {
+    return PlatformUtils.isPC() ? 20 : 10;
+  }
+}
+
+class SettingManager {
+  static bool _dirty = false;
+  static final SettingConfig _config = SettingConfig();
+  static final FileSaver _fileSaver = FileSaver();
+  static Future<void> init({bool fromBackupRestore = false}) async {
+    _fileSaver.setSavePath(await PathUtils.settingFilePath());
+    await load();
+    if (fromBackupRestore) {
+      if (!Platform.isWindows) {
+        _config.tun.enable = true;
+      }
+    }
+
+    bool needSave = await parseConfig();
+    if (needSave) {
+      save();
+    }
+  }
+
+  static Future<void> uninit() async {}
+  static Future<bool> parseConfig() async {
+    bool save = false;
+
+    String languageTag = "en";
+    if (_config.languageTag.isNotEmpty) {
+      for (var locale in AppLocale.values) {
+        if (locale.languageTag == _config.languageTag) {
+          languageTag = locale.languageTag;
+          break;
+        }
+      }
+    } else {
+      String planguageTag = [
+        WidgetsBinding.instance.platformDispatcher.locale.languageCode,
+        WidgetsBinding.instance.platformDispatcher.locale.countryCode ?? "",
+      ].join("-");
+      for (var locale in AppLocale.values) {
+        if (locale.languageTag == planguageTag) {
+          languageTag = locale.languageTag;
+          break;
+        }
+      }
+    }
+
+    if (languageTag.isEmpty) {
+      languageTag = "en";
+    }
+
+    for (var locale in AppLocale.values) {
+      if (languageTag == locale.languageTag) {
+        save = true;
+        _config.languageTag = languageTag;
+        var current = LocaleSettings.currentLocale;
+        if (current != locale) {
+          await LocaleSettings.setLocale(locale);
+        }
+
+        break;
+      }
+    }
+
+    if (_config.regionCode.isEmpty) {
+      save = true;
+      _config.regionCode =
+          WidgetsBinding.instance.platformDispatcher.locale.countryCode ?? "US";
+    }
+
+    return save;
+  }
+
+  static Future<void> load() async {
+    String filePath = await PathUtils.settingFilePath();
+    var file = File(filePath);
+    bool exists = await file.exists();
+    if (!exists) {
+      _config.ui.autoOrientation = await SettingConfigItemUI.maybeTv();
+      _config.ui.tvMode = _config.ui.autoOrientation;
+      TextFieldEx.popupEdit = _config.ui.tvMode;
+      return;
+    }
+    String content = "";
+    try {
+      content = await file.readAsString();
+      if (content.isNotEmpty) {
+        var config = jsonDecode(content);
+        _config.fromJson(config);
+        if (_config.uiScreen.backgroundImageType ==
+                SettingConfigItemUIScreen.backgroundTypeLocal &&
+            _config.uiScreen.backgroundImageLocal.isNotEmpty) {
+          var file = File(_config.uiScreen.backgroundImageLocal);
+          try {
+            if (!await file.exists()) {
+              _config.uiScreen.backgroundImageLocal = "";
+            }
+          } catch (err) {}
+        }
+      }
+    } catch (err, stacktrace) {
+      Log.w("SettingManager.load exception $filePath ${err.toString()}");
+    }
+  }
+
+  static Future<void> save() async {
+    await _fileSaver.saveAsJson(_config);
+  }
+
+  static SettingConfig getConfig() {
+    return _config;
+  }
+
+  static void reset() {
+    _config.reset();
+  }
+
+  static void setDirty(bool dirty) {
+    _dirty = dirty;
+  }
+
+  static bool getDirty() {
+    return _dirty;
+  }
+}

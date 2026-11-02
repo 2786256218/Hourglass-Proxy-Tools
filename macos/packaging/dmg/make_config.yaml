@@ -1,0 +1,13 @@
+title: Hourglass
+#icon: ../../../assets/images/app_icon_256.icns
+contents:
+  - x: 192
+    y: 200
+    type: file
+    path: Hourglass.app
+  - x: 448
+    y: 200
+    type: link
+    path: '/Applications'
+#code-sign:
+  #signing-identity: TNPM9PFX3W

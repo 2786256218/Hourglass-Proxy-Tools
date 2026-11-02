@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Hourglass
+GenericName=Hourglass
+Comment=Hourglass client
+Exec=hourglass %u
+TryExec=hourglass
+Terminal=false
+Categories=Network;
+StartupNotify=true
+Icon=com.nebula.hourglass
+MimeType=x-scheme-handler/hourglass;

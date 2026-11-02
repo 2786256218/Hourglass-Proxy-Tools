@@ -1,0 +1,2011 @@
+// ignore_for_file: use_build_context_synchronously, empty_catches
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:hourglass/app/modules/biz.dart';
+import 'package:hourglass/app/modules/board_provider_manager.dart';
+import 'package:hourglass/app/modules/server_manager.dart';
+import 'package:hourglass/app/modules/setting_manager.dart';
+import 'package:hourglass/app/runtime/return_result.dart';
+import 'package:hourglass/app/utils/accessibility_utils.dart';
+import 'package:hourglass/app/utils/error_reporter_utils.dart';
+import 'package:hourglass/app/utils/file_utils.dart';
+import 'package:hourglass/app/utils/path_utils.dart';
+import 'package:hourglass/app/utils/proxy_conf_utils.dart';
+import 'package:hourglass/app/utils/ruleset_codes_utils.dart';
+import 'package:hourglass/app/utils/singbox_config_builder.dart';
+import 'package:hourglass/app/utils/singbox_outbound.dart';
+import 'package:hourglass/app/utils/url_launcher_utils.dart' show UrlLauncherUtils;
+import 'package:hourglass/app/utils/windows_version_helper.dart';
+import 'package:hourglass/i18n/strings.g.dart';
+import 'package:hourglass/screens/common_widget.dart';
+import 'package:hourglass/screens/dialog_utils.dart';
+import 'package:hourglass/screens/file_view_screen.dart';
+import 'package:hourglass/screens/group_helper.dart';
+import 'package:hourglass/screens/group_item_creator.dart';
+import 'package:hourglass/screens/group_item_options.dart';
+import 'package:hourglass/screens/group_screen.dart';
+import 'package:hourglass/screens/list_remove_screen.dart';
+import 'package:hourglass/screens/listview_multi_parts_builder.dart';
+import 'package:hourglass/screens/my_profiles_edit_screen.dart';
+import 'package:hourglass/screens/my_profiles_merge_screen.dart';
+import 'package:hourglass/screens/my_profiles_reorder_screen.dart';
+import 'package:hourglass/screens/server_select_keywords_screen.dart';
+import 'package:hourglass/screens/qrcode_screen.dart';
+import 'package:hourglass/screens/theme_config.dart';
+import 'package:hourglass/screens/theme_define.dart';
+import 'package:hourglass/screens/themes.dart';
+import 'package:hourglass/screens/widgets/framework.dart';
+import 'package:hourglass/screens/widgets/sheet.dart';
+import 'package:hourglass/screens/widgets/text_field.dart';
+import 'package:path/path.dart' as path;
+import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:tuple/tuple.dart';
+
+class MyProfilesScreen extends LasyRenderingStatefulWidget {
+  static RouteSettings routeSettings() {
+    return const RouteSettings(name: "MyProfilesScreen");
+  }
+
+  const MyProfilesScreen({super.key});
+
+  @override
+  State<MyProfilesScreen> createState() => MyProfilesScreenState();
+}
+
+class MyProfilesScreenState extends LasyRenderingState<MyProfilesScreen> {
+  static final Set<String> _expandGroup = {};
+  final _searchController = TextEditingController();
+  String _searchText = "";
+  final List<ListViewMultiPartsItem> _listViewParts = [];
+
+  Timer? _timer;
+  bool _rePaint = false;
+  @override
+  void initState() {
+    ServerConfigGroupItem item = ServerManager.getCustomGroup();
+    item.remark = t.meta.custom;
+
+    ServerDiversionGroupItem? itemDiversion =
+        ServerManager.getDiversionCustomGroup();
+
+    itemDiversion.remark = t.meta.custom;
+
+    _buildData();
+
+    ServerManager.onEventTestLatency(hashCode, (
+      String groupid,
+      String tag,
+      bool start,
+      bool finish,
+    ) {
+      if (!mounted) {
+        return;
+      }
+      if (start || finish) {
+        _buildData();
+      }
+
+      _rePaint = true;
+    });
+    ServerManager.onLatencyHistoryUpdated(hashCode, () {
+      if (!mounted) {
+        return;
+      }
+
+      _buildData();
+      setState(() {});
+    });
+    ServerManager.onEventAddConfig(hashCode, (
+      ServerConfigGroupItem item,
+    ) async {
+      if (!mounted) {
+        return;
+      }
+      _buildData();
+      setState(() {});
+    });
+    ServerManager.onEventUpdateConfig(hashCode, (
+      List<ServerConfigGroupItem> groups,
+    ) async {
+      if (!mounted) {
+        return;
+      }
+      _buildData();
+      setState(() {});
+    });
+    ServerManager.onEventRemoveConfig(hashCode, (
+      String groupid,
+      bool enable,
+      bool hasDeviersionGroup,
+    ) async {
+      if (!mounted) {
+        return;
+      }
+      _buildData();
+      setState(() {});
+    });
+    _timer ??= Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (_rePaint) {
+        _rePaint = false;
+        setState(() {});
+      }
+    });
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    _listViewParts.clear();
+    _timer?.cancel();
+    _timer = null;
+    ServerManager.removeListener(hashCode);
+
+    super.dispose();
+    ServerManager.saveServerConfig();
+    ServerManager.saveDiversionGroupConfig();
+    ServerManager.saveUse();
+  }
+
+  Future<bool> startVPN() async {
+    return await Biz.startOrRestartIfDirtyVPN(context, "MyProfilesScreen");
+  }
+
+  void _loadSearch(String? textVal) {
+    _searchText = (textVal ?? "").toLowerCase();
+    _buildData();
+    setState(() {});
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    _searchText = "";
+    _buildData();
+    setState(() {});
+  }
+
+  void _pushSearchSelect() async {
+    String? searchText = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: ServerSelectKeywordsScreen.routeSettings(),
+        builder: (context) => const ServerSelectKeywordsScreen(),
+      ),
+    );
+    if (searchText == null) {
+      _buildData();
+      setState(() {});
+      return;
+    }
+    _searchText = searchText;
+    _searchController.value = _searchController.value.copyWith(
+      text: _searchText,
+    );
+    _buildData();
+    setState(() {});
+  }
+
+  void _buildData() {
+    _listViewParts.clear();
+    {
+      ListViewMultiPartsItem item = ListViewMultiPartsItem();
+      item.creator = (data, index, bindNO) {
+        return createSearch();
+      };
+      _listViewParts.add(item);
+    }
+    {
+      ListViewMultiPartsItem item = ListViewMultiPartsItem();
+      item.creator = (data, index, bindNO) {
+        return const SizedBox(height: 10);
+      };
+      _listViewParts.add(item);
+    }
+
+    for (var group in ServerManager.getConfig().items) {
+      if (group.groupid == ServerManager.getCustomGroupId()) {
+        continue;
+      }
+      final provider = group.getBindProvider();
+
+      ListViewMultiPartsItem item = ListViewMultiPartsItem();
+      item.data = group;
+      item.creator = (data, index, bindNO) {
+        return createGroupProfile(provider, group);
+      };
+      _listViewParts.add(item);
+
+      if (!_expandGroup.contains(group.groupid)) {
+        continue;
+      }
+      /*Set<String> detours = {};
+      for (int i = 0; i < group.servers.length; ++i) {
+        String? detour = group.servers[i].raw["detour"];
+        if (detour != null && detour.isNotEmpty) {
+          detours.add(detour);
+        }
+      }*/
+
+      List<ProxyConfig> servers = [];
+      if (group.testLatency.isNotEmpty) {
+        servers = group.servers;
+      } else {
+        List<ProxyConfig> serversLatency = [];
+        List<ProxyConfig> serversLatencyEmpty = [];
+        List<ProxyConfig> serversLatencyError = [];
+        for (int i = 0; i < group.servers.length; ++i) {
+          var server = group.servers[i];
+          //if (detours.contains(server.tag)) {
+          //  continue;
+          //}
+          if (SettingManager.getConfig().uiScreen.hideInvalidServerMyProfiles) {
+            if (server.latency.isNotEmpty) {
+              int? value = int.tryParse(group.servers[i].latency);
+              if (value == null) {
+                continue;
+              }
+            }
+          }
+          if (SettingManager.getConfig().uiScreen.sortServerMyProfiles) {
+            if (server.latency.isEmpty) {
+              serversLatencyEmpty.add(server);
+            } else {
+              if (null == int.tryParse(server.latency)) {
+                serversLatencyError.add(server);
+              } else {
+                serversLatency.add(server);
+              }
+            }
+          } else {
+            servers.add(server);
+          }
+        }
+        if (SettingManager.getConfig().uiScreen.sortServerMyProfiles) {
+          serversLatency.sort((a, b) {
+            return int.parse(a.latency) - int.parse(b.latency);
+          });
+          servers.addAll(serversLatency);
+          servers.addAll(serversLatencyEmpty);
+          servers.addAll(serversLatencyError);
+        }
+      }
+      if (_searchText.isNotEmpty) {
+        servers = ServerManager.searchIn(servers, _searchText, true);
+      }
+
+      int count = 1;
+      for (int i = 0; i < servers.length; ++i) {
+        ListViewMultiPartsItem item = ListViewMultiPartsItem();
+        item.bindNO = count++;
+        item.data = servers[i];
+        item.creator = (data, index, bindNO) {
+          return createServer(provider, data, bindNO!);
+        };
+        _listViewParts.add(item);
+      }
+    }
+  }
+
+  Row createGroupTitle(
+    BoardProviderConfig? provider,
+    ServerConfigGroupItem item,
+  ) {
+    final tcontext = Translations.of(context);
+    Size windowSize = MediaQuery.of(context).size;
+    const double leftWidth = 5;
+    const double rightWidth = 40 + 15 + 26 + 15;
+
+    double centerWidth = windowSize.width - leftWidth - rightWidth;
+    return Row(
+      children: [
+        const SizedBox(width: 5),
+        SizedBox(
+          height: 40,
+          width: centerWidth,
+          child: InkWell(
+            onTap: () async {
+              onTapGroupTitle(item.groupid);
+            },
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.green),
+                  ),
+                  child: Text(
+                    item.getTypeShort(),
+                    style: const TextStyle(color: Colors.green, fontSize: 10),
+                  ),
+                ),
+                Icon(
+                  _expandGroup.contains(item.groupid)
+                      ? Icons.keyboard_arrow_up_outlined
+                      : Icons.keyboard_arrow_down_outlined,
+                  size: 26,
+                ),
+                if (provider != null) ...[Icon(Icons.business, size: 16)],
+                SizedBox(
+                  width:
+                      centerWidth -
+                      2 * 2 -
+                      15 -
+                      26 -
+                      2 -
+                      (provider != null ? 16 : 0),
+                  child: Tooltip(
+                    message: "${item.remark}[${item.servers.length}]",
+                    child: Text(
+                      "${item.remark}[${item.servers.length}]",
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: ThemeConfig.kFontSizeListItem,
+                        fontWeight: ThemeConfig.kFontWeightListItem,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const Spacer(),
+        SizedBox(
+          width: 40,
+          child: FittedBox(
+            fit: BoxFit.fill,
+            child: Tooltip(
+              message: item.enable
+                  ? tcontext.meta.enable
+                  : tcontext.meta.disable,
+              child: Switch.adaptive(
+                value: item.enable,
+                activeThumbColor: Colors.white,
+                activeTrackColor: ThemeDefine.kColorGreenBright,
+                onChanged: (bool newValue) async {
+                  final statusText = newValue
+                      ? Translations.of(context).meta.enable
+                      : Translations.of(context).meta.disable;
+                  AccessibilityUtils.announce(
+                    context,
+                    '${item.remark} $statusText',
+                  );
+                  await onChangedGroup(item.groupid, newValue);
+                },
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 15),
+        item.groupid != ServerManager.getCustomGroupId()
+            ? Tooltip(
+                message: tcontext.meta.remove,
+                child: InkWell(
+                  onTap: () async {
+                    bool? del = await DialogUtils.showConfirmDialog(
+                      context,
+                      tcontext.meta.removeConfirm,
+                    );
+                    if (del == true) {
+                      ServerManager.removeGroup(item.groupid, true);
+                      if (item.enable) {
+                        ServerManager.setDirty(true);
+                      }
+
+                      _buildData();
+                      setState(() {});
+                    }
+                  },
+                  child: const Icon(
+                    Icons.remove_circle_outlined,
+                    size: 26,
+                    color: Colors.red,
+                  ),
+                ),
+              )
+            : const SizedBox(width: 26),
+        const SizedBox(width: 15),
+      ],
+    );
+  }
+
+  Row createGroupFunction(
+    BoardProviderConfig? provider,
+    ServerConfigGroupItem item,
+  ) {
+    int count =
+        ServerManager.getTestOutboundServerLatencyTestingCount(item.groupid) +
+        item.testLatency.length;
+    final tcontext = Translations.of(context);
+    var settings = SettingManager.getConfig();
+    String updateTime = "";
+    DateTime? date = DateTime.tryParse(item.updateTime);
+    if (date != null) {
+      updateTime =
+          "${DateFormat.yMd(settings.languageTag).format(date)} ${DateFormat.Hm(settings.languageTag).format(date)}";
+    }
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.start,
+      children: [
+        const SizedBox(width: 5),
+        if (item.isRemote()) ...[
+          Row(
+            children: [
+              Tooltip(
+                message: "${tcontext.meta.update} ${tcontext.meta.profile}",
+                child: InkWell(
+                  onTap: () async {
+                    ServerManager.reload(item.groupid).then((value) {
+                      if (!mounted) {
+                        return;
+                      }
+
+                      if (value != null) {
+                        DialogUtils.showAlertDialog(
+                          context,
+                          tcontext.meta.updateFailed(p: value.message),
+                          showCopy: true,
+                          showFAQ: true,
+                          withVersion: true,
+                        );
+                      }
+                      if (!mounted) {
+                        return;
+                      }
+                      _buildData();
+                      setState(() {});
+                    });
+                    setState(() {});
+                  },
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.access_time_outlined, size: 26),
+                      const SizedBox(width: 5),
+                      Text(
+                        updateTime,
+                        style: const TextStyle(
+                          fontSize: ThemeConfig.kFontSizeListSubItem,
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      ServerManager.isReloading(item.groupid)
+                          ? const SizedBox(
+                              height: 26,
+                              width: 26,
+                              child: RepaintBoundary(
+                                child: CircularProgressIndicator(),
+                              ),
+                            )
+                          : const Icon(Icons.cloud_download_outlined, size: 26),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+          ),
+          if (provider?.hideSubscriptionLink != true) ...[
+            Row(
+              children: [
+                Tooltip(
+                  message: tcontext.meta.qrcode,
+                  child: InkWell(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          settings: QrcodeScreen.routeSettings(),
+                          builder: (context) =>
+                              QrcodeScreen(content: item.urlOrPath),
+                        ),
+                      );
+                    },
+                    child: const Icon(Icons.qr_code_scanner_outlined, size: 26),
+                  ),
+                ),
+                const SizedBox(width: 5),
+              ],
+            ),
+          ],
+        ],
+        if (!item.isRemote()) ...[
+          Row(
+            children: [
+              Tooltip(
+                message: tcontext.meta.add,
+                child: InkWell(
+                  onTap: () {
+                    onTapAdd(item);
+                  },
+                  child: const Icon(Icons.add_outlined, size: 26),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+          ),
+        ],
+        if ((provider?.hideNodeDetails != true) && !Platform.isWindows ||
+            (Platform.isWindows &&
+                VersionHelper.instance.isWindows10RS5OrGreater)) ...[
+          Row(
+            children: [
+              Tooltip(
+                message: tcontext.meta.share,
+                child: InkWell(
+                  onTap: () {
+                    onTapShare(item);
+                  },
+                  child: const Icon(Icons.share_outlined, size: 26),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+          ),
+        ],
+        if (item.groupid != ServerManager.getCustomGroupId()) ...[
+          Row(
+            children: [
+              Tooltip(
+                message: tcontext.meta.edit,
+                child: InkWell(
+                  onTap: () async {
+                    onTapEdit(provider, item);
+                  },
+                  child: const Icon(Icons.edit_outlined, size: 26),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+          ),
+        ],
+        ServerManager.isTestLatency(item.groupid)
+            ? Row(
+                children: [
+                  Stack(
+                    children: [
+                      const SizedBox(
+                        height: 26,
+                        width: 26,
+                        child: RepaintBoundary(
+                          child: CircularProgressIndicator(),
+                        ),
+                      ),
+                      Positioned(
+                        left: 0,
+                        top: 6,
+                        height: 20,
+                        width: 26,
+                        child: Text(
+                          count.toString(),
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: count > 999 ? 8 : 10),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 5),
+                ],
+              )
+            : Row(
+                children: [
+                  Tooltip(
+                    message: tcontext.meta.latencyTest,
+                    child: InkWell(
+                      onTap: () async {
+                        bool ok = await startVPN();
+                        if (!ok) {
+                          return;
+                        }
+                        ServerManager.testOutboundLatencyForGroup(
+                          item.groupid,
+                        ).then((err) {
+                          if (err != null) {
+                            if (mounted) {
+                              setState(() {});
+
+                              DialogUtils.showAlertDialog(
+                                context,
+                                err.message,
+                                showCopy: true,
+                                showFAQ: true,
+                                withVersion: true,
+                              );
+                            }
+                          }
+                        });
+                      },
+                      child: item.enable
+                          ? const Icon(Icons.bolt_outlined, size: 26)
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                ],
+              ),
+        if (item.isRemote() && item.site.isNotEmpty) ...[
+          Row(
+            children: [
+              Tooltip(
+                message: tcontext.meta.website,
+                child: InkWell(
+                  onTap: () {
+                    String newUrl =
+                        UrlLauncherUtils.reorganizationUrl(
+                          item.site,
+                          "_from_=hourglass",
+                        ) ??
+                        item.site;
+                    UrlLauncherUtils.loadUrl(newUrl);
+                  },
+                  child: const Icon(Icons.link_outlined, size: 26),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+          ),
+        ],
+        if (item.proxyFilterRemove.isNotEmpty) ...[
+          Row(
+            children: [
+              Tooltip(
+                message: tcontext.meta.removed,
+                child: InkWell(
+                  onTap: () async {
+                    final len = item.proxyFilterRemove.length;
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        settings: ListRemoveScreen.routeSettings(
+                          "profiles.proxyFilterRemove",
+                        ),
+                        builder: (context) => ListRemoveScreen(
+                          title: tcontext.meta.removed,
+                          data: item.proxyFilterRemove,
+                        ),
+                      ),
+                    );
+                    if (len != item.proxyFilterRemove.length) {
+                      ServerConfigGroupItem? group = ServerManager.getByGroupId(
+                        item.groupid,
+                      );
+                      if (group != null) {
+                        group.proxyFilterRemove = item.proxyFilterRemove;
+                      }
+
+                      _buildData();
+                      setState(() {});
+                    }
+                  },
+                  child: const Icon(Icons.delete_outline, size: 26),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Column createGroupProfile(
+    BoardProviderConfig? provider,
+    ServerConfigGroupItem item,
+  ) {
+    final tcontext = Translations.of(context);
+    Size windowSize = MediaQuery.of(context).size;
+
+    return Column(
+      children: [
+        Column(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const SizedBox(width: 5),
+            createGroupTitle(provider, item),
+            createGroupFunction(provider, item),
+            const SizedBox(height: 5),
+            CommonWidget.createGroupTraffic(
+              context,
+              item.groupid,
+              false,
+              item.traffic,
+              10,
+              MainAxisAlignment.start,
+              windowSize.width,
+              (String groupId) {
+                setState(() {});
+              },
+              (String groupId, ReturnResult<SubscriptionTraffic> value) {
+                if (!mounted) {
+                  return;
+                }
+                setState(() {});
+                if (value.error != null) {
+                  if (value.error!.message.contains("405")) {
+                    ServerManager.reload(item.groupid).then((value) {
+                      if (!mounted) {
+                        return;
+                      }
+
+                      if (value != null) {
+                        DialogUtils.showAlertDialog(
+                          context,
+                          tcontext.meta.updateFailed(p: value.message),
+                          showCopy: true,
+                          showFAQ: true,
+                          withVersion: true,
+                        );
+                      }
+                      setState(() {});
+                    });
+                  } else {
+                    DialogUtils.showAlertDialog(
+                      context,
+                      tcontext.meta.updateFailed(p: value.error!.message),
+                      showCopy: true,
+                      showFAQ: true,
+                      withVersion: true,
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+      ],
+    );
+  }
+
+  Widget createServer(
+    BoardProviderConfig? provider,
+    ProxyConfig server,
+    int index,
+  ) {
+    final themes = Provider.of<Themes>(context, listen: false);
+    String disableKey = ServerUse.getDisableKey(server);
+    bool disabled = ServerManager.getUse().disable.contains(disableKey);
+    ServerConfigGroupItem? item = ServerManager.getByGroupId(server.groupid);
+    bool isTesting = false;
+    bool isWaitTesting = false;
+    if (item != null && item.enable) {
+      isTesting = ServerManager.isTestOutboundServerLatencying(
+        server.groupid,
+        server.tag,
+      );
+      isWaitTesting = item.testLatency.contains(server.tag);
+    }
+
+    Size windowSize = MediaQuery.of(context).size;
+    const double padding = 10;
+    const double leftWidth = 30.0;
+    const double rightWidth = 135.0;
+
+    double centerWidth =
+        windowSize.width - leftWidth - rightWidth - padding * 2;
+    return Material(
+      borderRadius: ThemeDefine.kBorderRadius,
+      child: GestureDetector(
+        onTapDown: (details) {},
+        onSecondaryTapUp: (TapUpDetails details) {
+          onLongPressServer(provider, server, isTesting, isWaitTesting);
+        },
+        onLongPress: () async {
+          onLongPressServer(provider, server, isTesting, isWaitTesting);
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: padding),
+          width: double.infinity,
+          height: ThemeConfig.kListItemHeight,
+          color: disabled ? Colors.grey : null,
+          child: Row(
+            children: [
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: leftWidth,
+                        child: Text(
+                          index.toString(),
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      SizedBox(
+                        width: server.attach.isEmpty
+                            ? centerWidth
+                            : centerWidth - 30,
+                        child: Text(
+                          server.tag,
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 3,
+                          style: TextStyle(
+                            fontSize: ThemeConfig.kFontSizeListSubItem,
+                            fontFamily: Platform.isWindows ? 'Emoji' : null,
+                          ),
+                        ),
+                      ),
+                      server.attach.isEmpty
+                          ? const SizedBox.shrink()
+                          : SizedBox(
+                              width: 30,
+                              child: Text(
+                                server.attach,
+                                style: const TextStyle(fontSize: 10),
+                              ),
+                            ),
+                      Container(
+                        alignment: Alignment.centerRight,
+                        width: rightWidth,
+                        child: Row(
+                          children: [
+                            const SizedBox(width: 5),
+                            /*InkWell(
+                          onTap: () {
+                            Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                     settings: QrcodeScreen.routeSettings(),
+                                    builder: (context) =>
+                                        QrcodeScreen(content: "todo")));
+                          },
+                          child: Container(
+                            width: 20,
+                            height: 20,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.whitewithValues(alpha: 0.8),
+                            ),
+                            child: const Icon(Icons.qr_code_scanner_outlined,
+                                size: 20, color: Colors.black),
+                          ),
+                        ),
+                        const SizedBox(
+                          width: 10,
+                        ),*/
+                            SizedBox(
+                              height: ThemeConfig.kListItemHeight,
+                              child: InkWell(
+                                onTap: () {
+                                  ServerManager.toggleFav(server);
+                                  if (SettingManager.getConfig()
+                                      .autoSelect
+                                      .prioritizeMyFav) {
+                                    ServerManager.setDirty(true);
+                                  }
+                                  setState(() {});
+                                },
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      decoration: const BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Colors.orange,
+                                      ),
+                                      child: Container(
+                                        width: 20,
+                                        height: 20,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: Colors.white.withValues(
+                                            alpha: 0.8,
+                                          ),
+                                        ),
+                                        child: Icon(
+                                          Icons.star_outlined,
+                                          size: 20,
+                                          color:
+                                              ServerManager.getUse().fav
+                                                  .contains(server)
+                                              ? Colors.orange
+                                              : Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 2),
+                                    SizedBox(
+                                      width: 45,
+                                      child: Text(
+                                        server.getShowType(),
+                                        style: const TextStyle(fontSize: 12),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 2),
+                            CommonWidget.createLatencyWidget(
+                              context,
+                              themes,
+                              ThemeConfig.kListItemHeight,
+                              isTesting || isWaitTesting,
+                              isTesting,
+                              server.latency,
+                              onTapLatencyReload: () async {
+                                if (!await startVPN()) {
+                                  return;
+                                }
+                                ServerManager.testOutboundLatencyForServer(
+                                  server.tag,
+                                  server.groupid,
+                                ).then((err) {
+                                  if (err != null) {
+                                    if (mounted) {
+                                      setState(() {});
+
+                                      DialogUtils.showAlertDialog(
+                                        context,
+                                        err.message,
+                                        showCopy: true,
+                                        showFAQ: true,
+                                        withVersion: true,
+                                      );
+                                    }
+                                  }
+                                });
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tcontext = Translations.of(context);
+    Size windowSize = MediaQuery.of(context).size;
+    return Scaffold(
+      appBar: PreferredSize(preferredSize: Size.zero, child: AppBar()),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(0, 20, 0, 0),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(0, 0, 0, 0),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    InkWell(
+                      onTap: () => Navigator.pop(context),
+                      child: const SizedBox(
+                        width: 50,
+                        height: 30,
+                        child: Icon(Icons.arrow_back_ios_outlined, size: 26),
+                      ),
+                    ),
+                    InkWell(
+                      onTap: () {
+                        onTapExpandAllGroup();
+                      },
+                      child: Row(
+                        children: [
+                          Icon(
+                            _expandGroup.isNotEmpty
+                                ? Icons.keyboard_double_arrow_up_outlined
+                                : Icons.keyboard_double_arrow_down_outlined,
+                            size: 26,
+                          ),
+                          SizedBox(
+                            width: windowSize.width - 50 * 3 - 26,
+                            child: Text(
+                              tcontext.meta.myProfiles,
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: ThemeConfig.kFontWeightTitle,
+                                fontSize: ThemeConfig.kFontSizeTitle,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        ServerManager.hasTestOutboundServer()
+                            ? const SizedBox(
+                                height: 26,
+                                width: 26,
+                                child: RepaintBoundary(
+                                  child: CircularProgressIndicator(),
+                                ),
+                              )
+                            : Tooltip(
+                                message: tcontext.meta.latencyTest,
+                                child: InkWell(
+                                  onTap: () async {
+                                    onTapTestOutboundLatencyAll();
+                                  },
+                                  child: const SizedBox(
+                                    width: 50,
+                                    height: 30,
+                                    child: Icon(Icons.bolt_outlined, size: 30),
+                                  ),
+                                ),
+                              ),
+                        Tooltip(
+                          message: tcontext.meta.more,
+                          child: InkWell(
+                            onTap: () async {
+                              onTapMore();
+                            },
+                            child: const SizedBox(
+                              width: 50,
+                              height: 30,
+                              child: Icon(Icons.more_vert_outlined, size: 30),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Expanded(child: ListViewMultiPartsBuilder.build(_listViewParts)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Container createSearch() {
+    final tcontext = Translations.of(context);
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.only(left: 0, right: 0),
+      height: 44,
+      width: double.infinity,
+      decoration: const BoxDecoration(borderRadius: ThemeDefine.kBorderRadius),
+      child: TextFieldEx(
+        controller: _searchController,
+        textInputAction: TextInputAction.done,
+        onChanged: _loadSearch,
+        decoration: InputDecoration(
+          border: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          prefixIcon: Icon(Icons.search_outlined),
+          hintText: tcontext.meta.search,
+          suffixIcon: _searchController.text.isNotEmpty
+              ? IconButton(
+                  icon: const Icon(Icons.clear_outlined),
+                  onPressed: _clearSearch,
+                )
+              : Tooltip(
+                  message: tcontext.meta.candidateWord,
+                  child: IconButton(
+                    icon: const Icon(Icons.arrow_forward_ios_outlined),
+                    onPressed: _pushSearchSelect,
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+
+  void onTapExpandAllGroup() {
+    if (_expandGroup.isNotEmpty) {
+      _expandGroup.clear();
+    } else {
+      for (var item in ServerManager.getConfig().items) {
+        if (item.groupid == ServerManager.getCustomGroupId()) {
+          continue;
+        }
+        _expandGroup.add(item.groupid);
+      }
+    }
+
+    _buildData();
+    setState(() {});
+  }
+
+  List<Widget> getLongPressServerWidgets(
+    BoardProviderConfig? provider,
+    ProxyConfig server,
+    bool isTesting,
+    bool isWaitTesting,
+    bool insertBlackspace,
+  ) {
+    if (!mounted) {
+      return [];
+    }
+    ServerConfigGroupItem? item = ServerManager.getByGroupId(server.groupid);
+    if (item == null) {
+      return [];
+    }
+    final tcontext = Translations.of(context);
+    String disableKey = ServerUse.getDisableKey(server);
+    bool disabled = ServerManager.getUse().disable.contains(disableKey);
+    String msg = disabled ? tcontext.meta.enable : tcontext.meta.disable;
+    msg += "[${server.type};${server.server};${server.serverport}]";
+
+    var widgets = [
+      ListTile(
+        title: Text(insertBlackspace ? "  $msg" : msg),
+        onTap: () async {
+          Navigator.pop(context);
+          var use = ServerManager.getUse();
+          if (disabled) {
+            use.disable.remove(disableKey);
+          } else {
+            use.disable.add(disableKey);
+          }
+          if (item.enable) {
+            ServerManager.setDirty(true);
+          }
+
+          setState(() {});
+        },
+      ),
+      if (provider?.hideNodeDetails != true) ...[
+        ListTile(
+          title: Text(
+            insertBlackspace ? "  ${tcontext.meta.share}" : tcontext.meta.share,
+          ),
+          onTap: () async {
+            Navigator.pop(context);
+            const JsonEncoder encoder = JsonEncoder.withIndent('');
+            String configContent = encoder.convert(
+              SingboxConfigBuilder.buildOutbound(server),
+            );
+            Codec<String, String> stringToBase64 = utf8.fuse(base64);
+            String b64 = stringToBase64.encode("[$configContent]");
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                settings: QrcodeScreen.routeSettings(),
+                builder: (context) => QrcodeScreen(
+                  content:
+                      "ulink://install/?content=${Uri.encodeComponent(b64)}&format=json#${Uri.encodeComponent(server.tag)}",
+                ),
+              ),
+            );
+          },
+        ),
+        ListTile(
+          title: Text(
+            insertBlackspace ? "  ${tcontext.meta.view}" : tcontext.meta.view,
+          ),
+          onTap: () async {
+            Navigator.pop(context);
+            const JsonEncoder encoder = JsonEncoder.withIndent('  ');
+            String content = server.raw != null
+                ? encoder.convert(server.raw)
+                : encoder.convert(SingboxConfigBuilder.buildOutbound(server));
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                settings: FileViewScreen.routeSettings(),
+                builder: (context) =>
+                    FileViewScreen(title: server.tag, content: content),
+              ),
+            );
+          },
+        ),
+      ],
+      if (!isTesting &&
+          !isWaitTesting &&
+          item.testLatency.isEmpty &&
+          item.testLatencyIndepends.isEmpty) ...[
+        ListTile(
+          title: Text(
+            insertBlackspace
+                ? "  ${tcontext.meta.remove}"
+                : tcontext.meta.remove,
+          ),
+          onTap: () async {
+            Navigator.pop(context);
+            for (int i = 0; i < item.servers.length; ++i) {
+              if (item.servers[i].tag == server.tag) {
+                item.servers.removeAt(i);
+                if (item.enable) {
+                  ServerManager.setDirty(true);
+                }
+                if (item.isRemote() &&
+                    !item.proxyFilterRemove.contains(server.tag)) {
+                  item.proxyFilterRemove.add(server.tag);
+                }
+                _buildData();
+                setState(() {});
+                break;
+              }
+            }
+          },
+        ),
+      ],
+      if (!SettingManager.getConfig().novice) ...[
+        if (provider?.hideNodeDetails != true) ...[
+          ListTile(
+            title: Text(
+              insertBlackspace ? "  ${tcontext.meta.edit}" : tcontext.meta.edit,
+            ),
+            onTap: () async {
+              Navigator.pop(context);
+              onTapEditServer(item, server);
+            },
+          ),
+        ],
+      ],
+    ];
+
+    return widgets;
+  }
+
+  void onLongPressServer(
+    BoardProviderConfig? provider,
+    ProxyConfig server,
+    bool isTesting,
+    bool isWaitTesting,
+  ) async {
+    var widgets = getLongPressServerWidgets(
+      provider,
+      server,
+      isTesting,
+      isWaitTesting,
+      false,
+    );
+    showSheetWidgets(context: context, widgets: widgets);
+  }
+
+  void onTapMore() {
+    final tcontext = Translations.of(context);
+    List<Widget> widgets = [
+      ListTile(
+        title: Text(tcontext.meta.setting),
+        leading: Icon(Icons.settings_outlined),
+        onTap: () async {
+          Navigator.pop(context);
+          onTapSetting();
+        },
+      ),
+      ListTile(
+        title: Text(tcontext.meta.addProfile),
+        leading: Icon(Icons.add_outlined),
+        onTap: () async {
+          Navigator.pop(context);
+          onTapAddProfile();
+        },
+      ),
+      ListTile(
+        title: Text(tcontext.meta.update),
+        leading: Icon(Icons.cloud_download_outlined),
+        onTap: () async {
+          Navigator.pop(context);
+          onTapReloadAll();
+        },
+      ),
+      ListTile(
+        title: Text(tcontext.meta.sort),
+        leading: Icon(Icons.sort_outlined),
+        onTap: () async {
+          Navigator.pop(context);
+          onTapSort();
+        },
+      ),
+      ListTile(
+        title: Text(tcontext.MyProfilesMergeScreen.profilesMerge),
+        leading: Icon(Icons.merge_outlined),
+        onTap: () async {
+          Navigator.pop(context);
+          onTapMerge();
+        },
+      ),
+    ];
+
+    showSheetWidgets(context: context, widgets: widgets);
+  }
+
+  void onTapTestOutboundLatencyAll() async {
+    bool ok = await startVPN();
+    if (!ok) {
+      return;
+    }
+    for (var group in ServerManager.getConfig().items) {
+      ServerManager.testOutboundLatencyForGroup(group.groupid);
+    }
+  }
+
+  void onTapSetting() async {
+    final tcontext = Translations.of(context);
+    Future<List<GroupItem>> getOptions(
+      BuildContext context,
+      SetStateCallback? setstate,
+    ) async {
+      var settingConfig = SettingManager.getConfig();
+
+      List<GroupItemOptions> options = [
+        GroupItemOptions(
+          switchOptions: GroupItemSwitchOptions(
+            name: tcontext.SettingsScreen.hideInvalidServer,
+            switchValue: settingConfig.uiScreen.hideInvalidServerMyProfiles,
+            onSwitch: (bool value) async {
+              settingConfig.uiScreen.hideInvalidServerMyProfiles = value;
+
+              setState(() {});
+            },
+          ),
+        ),
+        GroupItemOptions(
+          switchOptions: GroupItemSwitchOptions(
+            name: tcontext.SettingsScreen.sortServer,
+            switchValue: settingConfig.uiScreen.sortServerMyProfiles,
+            onSwitch: (bool value) async {
+              settingConfig.uiScreen.sortServerMyProfiles = value;
+              setState(() {});
+            },
+          ),
+        ),
+      ];
+
+      return [GroupItem(options: options)];
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: GroupScreen.routeSettings("MyProfilesScreen.setting"),
+        builder: (context) =>
+            GroupScreen(title: tcontext.meta.setting, getOptions: getOptions),
+      ),
+    );
+    _buildData();
+    setState(() {});
+    SettingManager.save();
+  }
+
+  void onTapReloadAll() {
+    ServerManager.reloadAll();
+    setState(() {});
+  }
+
+  void onTapSort() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: MyProfilesReorderScreen.routeSettings(),
+        builder: (context) => MyProfilesReorderScreen(
+          onReorder: (List<String> groupids) {
+            ServerManager.reorderGroup(groupids);
+            ServerManager.setDirty(true);
+            Future.delayed(const Duration(milliseconds: 10), () {
+              if (!mounted) {
+                return;
+              }
+              _buildData();
+              setState(() {});
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  void onTapMerge() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: MyProfilesMergeScreen.routeSettings(),
+        builder: (context) => const MyProfilesMergeScreen(),
+      ),
+    );
+    setState(() {});
+  }
+
+  void onTapAddProfile() async {
+    await GroupHelper.showAddProfile(context, false);
+    _buildData();
+    setState(() {});
+  }
+
+  void onTapGroupTitle(String groupid) {
+    if (_expandGroup.contains(groupid)) {
+      _expandGroup.remove(groupid);
+    } else {
+      _expandGroup.add(groupid);
+    }
+    _buildData();
+    setState(() {});
+  }
+
+  Future<void> onChangedGroup(String groupid, bool newValue) async {
+    await ServerManager.enableGroup(groupid, newValue);
+    ServerManager.setDirty(true);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {});
+  }
+
+  void onTapAdd(ServerConfigGroupItem item) async {
+    final tcontext = Translations.of(context);
+    DialogUtilsResult<String>? name = await DialogUtils.showStringPickerDialog(
+      context,
+      tcontext.meta.add,
+      SingboxOutboundType.getNames(),
+      SingboxOutboundType.socks.name,
+    );
+    if (name == null || name.data == null) {
+      return;
+    }
+    SingboxOutboundOptions sbOptions = SingboxOutboundOptions();
+    sbOptions.type = name.data!;
+    switch (sbOptions.type) {
+      case "shadowsocks":
+        sbOptions.shadowsocks = SingboxOutboundShadowsocksOptions();
+        break;
+      case "shadowsocksr":
+        sbOptions.shadowsocksr = SingboxOutboundShadowsocksROptions();
+        break;
+      case "shadowtls":
+        sbOptions.shadowtls = SingboxOutboundShadowTLSOptions();
+        break;
+      case "vmess":
+        sbOptions.vmess = SingboxOutboundVMessOptions();
+        break;
+      case "vless":
+        sbOptions.vless = SingboxOutboundVLESSOptions();
+        break;
+      case "trojan":
+        sbOptions.trojan = SingboxOutboundTrojanOptions();
+        break;
+      case "socks":
+        sbOptions.socks = SingboxOutboundSocksOptions();
+        break;
+      case "http":
+        sbOptions.http = SingboxOutboundHTTPOptions();
+        break;
+      case "hysteria":
+        sbOptions.hysteria = SingboxOutboundHysteriaOptions();
+        break;
+      case "hysteria2":
+        sbOptions.hysteria2 = SingboxOutboundHysteria2Options();
+        break;
+      case "wireguard":
+        sbOptions.wg = SingboxOutboundWireGuardOptions();
+        break;
+      case "tuic":
+        sbOptions.tuic = SingboxOutboundTUICOptions();
+        break;
+      case "tor":
+        sbOptions.tor = SingboxOutboundTorOptions();
+        break;
+      case "ssh":
+        sbOptions.ssh = SingboxOutboundSSHOptions();
+        break;
+      case "anytls":
+        sbOptions.anytls = SingboxOutboundAnyTlsOptions();
+        break;
+
+      case "naive":
+        sbOptions.naive = SingboxOutboundNaiveOptions();
+        break;
+      case "snell":
+        sbOptions.snell = SingboxOutboundSnellOptions();
+        break;
+      case "tailscale":
+        sbOptions.tailscale = SingboxOutboundTailscaleOptions();
+        break;
+      case "openvpn-client":
+        sbOptions.openvpn = SingboxOutboundOpenvpnOptions();
+        break;
+      //openconnect
+      case "mieru":
+        sbOptions.mieru = SingboxOutboundMieruOptions();
+        break;
+      case "sudoku":
+        sbOptions.sudoku = SingboxOutboundSudokuOptions();
+        break;
+      case "trusttunnel":
+        sbOptions.trusttunnel = SingboxOutboundTrustTunnelOptions();
+        break;
+      case "masque":
+        sbOptions.masque = SingboxOutboundMasqueOptions();
+        break;
+      default:
+        return;
+    }
+    Future<List<GroupItem>> getOptions(
+      BuildContext context,
+      SetStateCallback? setstate,
+    ) async {
+      List<GroupItemOptions> options = [
+        GroupItemOptions(
+          textFormFieldOptions: GroupItemTextFieldOptions(
+            name: "tag",
+            text: sbOptions.tag,
+            textWidthPercent: 0.6,
+            hint: tcontext.meta.required,
+            onChanged: (String value) {
+              if (value.isEmpty) {
+                return;
+              }
+              sbOptions.tag = value;
+            },
+          ),
+        ),
+        GroupItemOptions(
+          textOptions: GroupItemTextOptions(
+            name: "type",
+            text: sbOptions.type,
+            textWidthPercent: 0.6,
+          ),
+        ),
+      ];
+      List<GroupItem> allOptions = [GroupItem(options: options)];
+
+      allOptions.addAll(await sbOptions.getWidgetOptions(context, setstate));
+      return allOptions;
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: GroupScreen.routeSettings("add-edit:${sbOptions.type}"),
+        builder: (context) => GroupScreen(
+          title: tcontext.meta.edit,
+          getOptions: getOptions,
+          onDone: (BuildContext context, SetStateCallback? setstate) async {
+            if (!mounted) {
+              return false;
+            }
+            String? ret;
+            ProxyConfig server = ProxyConfig();
+            server.groupid = item.groupid;
+            server.index = item.servers.length;
+            server.tag = sbOptions.tag;
+            server.type = sbOptions.type;
+            switch (sbOptions.type) {
+              case "shadowsocks":
+                ret = sbOptions.shadowsocks!.getRequired();
+                sbOptions.server = sbOptions.shadowsocks!.server ?? "";
+                sbOptions.server_port = sbOptions.shadowsocks!.server_port ?? 0;
+                break;
+              case "shadowsocksr":
+                ret = sbOptions.shadowsocksr!.getRequired();
+                sbOptions.server = sbOptions.shadowsocksr!.server ?? "";
+                sbOptions.server_port =
+                    sbOptions.shadowsocksr!.server_port ?? 0;
+                break;
+              case "shadowtls":
+                ret = sbOptions.shadowtls!.getRequired();
+                sbOptions.server = sbOptions.shadowtls!.server ?? "";
+                sbOptions.server_port = sbOptions.shadowtls!.server_port ?? 0;
+                break;
+              case "vmess":
+                ret = sbOptions.vmess!.getRequired();
+                sbOptions.server = sbOptions.vmess!.server ?? "";
+                sbOptions.server_port = sbOptions.vmess!.server_port ?? 0;
+                break;
+              case "vless":
+                ret = sbOptions.vless!.getRequired();
+                sbOptions.server = sbOptions.vless!.server ?? "";
+                sbOptions.server_port = sbOptions.vless!.server_port ?? 0;
+                break;
+              case "trojan":
+                ret = sbOptions.trojan!.getRequired();
+                sbOptions.server = sbOptions.trojan!.server ?? "";
+                sbOptions.server_port = sbOptions.trojan!.server_port ?? 0;
+                break;
+              case "socks":
+                ret = sbOptions.socks!.getRequired();
+                sbOptions.server = sbOptions.socks!.server ?? "";
+                sbOptions.server_port = sbOptions.socks!.server_port ?? 0;
+                break;
+              case "http":
+                ret = sbOptions.http!.getRequired();
+                sbOptions.server = sbOptions.http!.server ?? "";
+                sbOptions.server_port = sbOptions.http!.server_port ?? 0;
+                break;
+              case "hysteria":
+                ret = sbOptions.hysteria!.getRequired();
+                sbOptions.server = sbOptions.hysteria!.server ?? "";
+                sbOptions.server_port = sbOptions.hysteria!.server_port ?? 0;
+                break;
+              case "hysteria2":
+                ret = sbOptions.hysteria2!.getRequired();
+                sbOptions.server = sbOptions.hysteria2!.server ?? "";
+                sbOptions.server_port = sbOptions.hysteria2!.server_port ?? 0;
+                break;
+              case "wireguard":
+                ret = sbOptions.wg!.getRequired();
+                sbOptions.server = sbOptions.wg!.server ?? "";
+                sbOptions.server_port = sbOptions.wg!.server_port ?? 0;
+                break;
+              case "tuic":
+                ret = sbOptions.tuic!.getRequired();
+                sbOptions.server = sbOptions.tuic!.server ?? "";
+                sbOptions.server_port = sbOptions.tuic!.server_port ?? 0;
+                break;
+              case "tor":
+                ret = sbOptions.tor!.getRequired();
+                sbOptions.server = sbOptions.tor!.server ?? "";
+                sbOptions.server_port = sbOptions.tor!.server_port ?? 0;
+                break;
+              case "ssh":
+                ret = sbOptions.ssh!.getRequired();
+                sbOptions.server = sbOptions.ssh!.server ?? "";
+                sbOptions.server_port = sbOptions.ssh!.server_port ?? 0;
+                break;
+              case "anytls":
+                ret = sbOptions.anytls!.getRequired();
+                sbOptions.server = sbOptions.anytls!.server ?? "";
+                sbOptions.server_port = sbOptions.anytls!.server_port ?? 0;
+                break;
+
+              case "naive":
+                ret = sbOptions.naive!.getRequired();
+                sbOptions.server = sbOptions.naive!.server ?? "";
+                sbOptions.server_port = sbOptions.naive!.server_port ?? 0;
+                break;
+              case "snell":
+                ret = sbOptions.snell!.getRequired();
+                sbOptions.server = sbOptions.snell!.server ?? "";
+                sbOptions.server_port = sbOptions.snell!.server_port ?? 0;
+                break;
+              case "tailscale":
+                ret = sbOptions.tailscale!.getRequired();
+                sbOptions.server = sbOptions.tailscale!.server ?? "";
+                sbOptions.server_port = sbOptions.tailscale!.server_port ?? 0;
+                break;
+              case "openvpn-client":
+                ret = sbOptions.openvpn!.getRequired();
+                sbOptions.server = sbOptions.openvpn!.server ?? "";
+                sbOptions.server_port = sbOptions.openvpn!.server_port ?? 0;
+                break;
+              //openconnect
+              case "mieru":
+                ret = sbOptions.mieru!.getRequired();
+                sbOptions.server = sbOptions.mieru!.server ?? "";
+                sbOptions.server_port = sbOptions.mieru!.server_port ?? 0;
+                break;
+              case "sudoku":
+                ret = sbOptions.sudoku!.getRequired();
+                sbOptions.server = sbOptions.sudoku!.server ?? "";
+                sbOptions.server_port = sbOptions.sudoku!.server_port ?? 0;
+                break;
+              case "trusttunnel":
+                ret = sbOptions.trusttunnel!.getRequired();
+                sbOptions.server = sbOptions.trusttunnel!.server ?? "";
+                sbOptions.server_port = sbOptions.trusttunnel!.server_port ?? 0;
+                break;
+              case "masque":
+                ret = sbOptions.masque!.getRequired();
+                sbOptions.server = sbOptions.masque!.server ?? "";
+                sbOptions.server_port = sbOptions.masque!.server_port ?? 0;
+                break;
+            }
+            if (ret != null) {
+              DialogUtils.showAlertDialog(
+                context,
+                "$ret ${tcontext.meta.required}",
+              );
+              return false;
+            }
+            if (sbOptions.tag.isEmpty) {
+              DialogUtils.showAlertDialog(
+                context,
+                "tag ${tcontext.meta.required}",
+              );
+              return false;
+            }
+            server.server = sbOptions.server;
+            server.serverport = sbOptions.server_port;
+            server.raw = sbOptions.toJson();
+            if (item.enable) {
+              ServerManager.setDirty(true);
+            }
+            item.servers.add(server);
+
+            return true;
+          },
+        ),
+      ),
+    );
+    _buildData();
+    setState(() {});
+  }
+
+  void onTapShare(ServerConfigGroupItem item) async {
+    if (!mounted) {
+      return;
+    }
+    bool tunMode = false;
+    String savePath = path.join(
+      await PathUtils.cacheDir(),
+      'profile_share.json',
+    );
+    await FileUtils.deletePath(savePath);
+    SingboxConfig config = SingboxConfig();
+    dynamic selectOutbound = SingboxConfigBuilder.buildOutbound(
+      ServerManager.getUrltest(),
+    );
+    final diversionGroupsResult = ServerManager.getDiversionGroups();
+    if (diversionGroupsResult.error != null) {
+      DialogUtils.showAlertDialog(
+        context,
+        diversionGroupsResult.error!.message,
+        showCopy: true,
+        showFAQ: true,
+        withVersion: true,
+      );
+      return;
+    }
+    List<Tuple3<DiversionRulesGroup, ProxyConfig, List<String>>>
+    diversionGroups = diversionGroupsResult.data!;
+    Set<String> selectOutboundTags = {};
+    List<dynamic> allOutBounds = [];
+    for (var server in item.servers) {
+      selectOutboundTags.add(server.tag);
+      var bound = SingboxConfigBuilder.buildOutbound(server);
+      if (bound != null) {
+        allOutBounds.add(bound);
+      }
+    }
+    config.ntp = SingboxConfigBuilder.ntp();
+    final dns = SingboxConfigBuilder.dns(
+      tunMode,
+      SingboxExportType.hourglass,
+      null,
+      null,
+    );
+    if (dns.error != null) {
+      DialogUtils.showAlertDialog(
+        context,
+        dns.error!.message,
+        showCopy: true,
+        showFAQ: true,
+        withVersion: true,
+      );
+      return;
+    }
+    config.dns = dns.data!;
+    config.inbounds = SingboxConfigBuilder.inbounds(
+      false,
+      SingboxExportType.hourglass,
+    );
+    for (var inbound in config.inbounds) {
+      if (inbound is SingboxInboundTunOptions) {
+        inbound.address = ["172.19.0.1/30"];
+        inbound.include_package = [];
+        inbound.exclude_package = [];
+        break;
+      }
+    }
+    final result = SingboxConfigBuilder.outbounds(
+      "",
+      selectOutboundTags,
+      {},
+      selectOutbound,
+      allOutBounds,
+      null,
+      {},
+      [],
+      null,
+      SingboxExportType.hourglass,
+    );
+    if (result.error != null) {
+      DialogUtils.showAlertDialog(
+        context,
+        result.error!.message,
+        showCopy: true,
+        showFAQ: true,
+        withVersion: true,
+      );
+      return;
+    }
+    config.outbounds = result.data!;
+    config.endpoints = SingboxConfigBuilder.endpoints(config.outbounds);
+
+    var sitecodesHashCode = await RulesetCodesUtils.siteCodesHashCode();
+    var ipcodesHashCode = await RulesetCodesUtils.ipCodesHashCode();
+    var aclcodesHashCode = await RulesetCodesUtils.aclCodesHashCode();
+
+    config.route = SingboxConfigBuilder.route(
+      "",
+      "",
+      "",
+      "",
+      sitecodesHashCode,
+      ipcodesHashCode,
+      aclcodesHashCode,
+      tunMode,
+      allOutBounds,
+      {},
+      null,
+      diversionGroups,
+      config.inbounds,
+      config.dns,
+      null,
+      null,
+      null,
+      item.groupid,
+      SingboxExportType.hourglass,
+    );
+
+    const JsonEncoder encoder = JsonEncoder.withIndent('  ');
+    String content = encoder.convert(config);
+    try {
+      await File(savePath).writeAsString(content, flush: true);
+      if (!await FileUtils.validJsonFile(savePath)) {
+        await File(savePath).writeAsString(content, flush: true);
+      }
+    } catch (err) {
+      ErrorReporterUtils.tryReportNoSpace(err.toString());
+    }
+
+    try {
+      final box = context.findRenderObject() as RenderBox?;
+      final rect = box != null
+          ? box.localToGlobal(Offset.zero) & box.size
+          : null;
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(savePath)], sharePositionOrigin: rect),
+      );
+    } catch (err, stacktrace) {
+      if (!context.mounted) {
+        return;
+      }
+      DialogUtils.showExceptionDialog(context, err, stacktrace);
+    }
+  }
+
+  void onTapEdit(
+    BoardProviderConfig? provider,
+    ServerConfigGroupItem item,
+  ) async {
+    bool? changed = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: MyProfilesEditScreen.routeSettings(),
+        builder: (context) =>
+            MyProfilesEditScreen(groupid: item.groupid, provider: provider),
+      ),
+    );
+    if (changed == true) {
+      _buildData();
+      setState(() {});
+    }
+  }
+
+  void onTapEditServer(ServerConfigGroupItem item, ProxyConfig server) async {
+    final tcontext = Translations.of(context);
+    if (item.isRemote()) {
+      bool? ok = await DialogUtils.showConfirmDialog(
+        context,
+        tcontext.remoteProfileEditConfirm,
+      );
+      if (ok != true) {
+        return;
+      }
+    }
+    SingboxOutboundOptions sbOptions = SingboxOutboundOptions();
+    try {
+      sbOptions.fromJson(server.raw);
+    } catch (err, stacktrace) {
+      DialogUtils.showExceptionDialog(context, err, stacktrace);
+      //Log.w(
+      //    "onTapEditServer exception ${err.toString()}\n\n${stacktrace.toString()}");
+      return;
+    }
+
+    if (!sbOptions.isValid()) {
+      return;
+    }
+    List<String> autocompleteCandidates = [""];
+    ServerConfigGroupItem customItem = ServerManager.getCustomGroup();
+    for (var ut in customItem.urltests) {
+      if (ut.remark != item.remark) {
+        autocompleteCandidates.add("$kOutboundTagUrltest-${ut.remark}");
+      }
+    }
+    for (var item in ServerManager.getConfig().items) {
+      if (item.enable) {
+        for (var current in item.servers) {
+          if (current.tag != server.tag) {
+            autocompleteCandidates.add(current.tag);
+          }
+        }
+      }
+    }
+    Future<List<GroupItem>> getOptions(
+      BuildContext context,
+      SetStateCallback? setstate,
+    ) async {
+      List<GroupItemOptions> options = [
+        GroupItemOptions(
+          textFormFieldOptions: GroupItemTextFieldOptions(
+            name: "tag",
+            text: sbOptions.tag,
+            textStyle: TextStyle(
+              fontFamily: Platform.isWindows ? 'Emoji' : null,
+            ),
+            textWidthPercent: 0.6,
+            hint: tcontext.meta.required,
+            onChanged: (String value) {
+              if (value.isEmpty) {
+                return;
+              }
+              sbOptions.tag = value.trim();
+            },
+          ),
+        ),
+        GroupItemOptions(
+          textOptions: GroupItemTextOptions(
+            name: "type",
+            text: sbOptions.type,
+            textWidthPercent: 0.6,
+          ),
+        ),
+        GroupItemOptions(
+          textFormFieldOptions: GroupItemTextFieldOptions(
+            name: "detour",
+            text: sbOptions.dialer?.detour ?? "",
+            textStyle: TextStyle(
+              fontFamily: Platform.isWindows ? 'Emoji' : null,
+            ),
+            textWidthPercent: 0.6,
+            onChanged: (String value) {
+              if (value.trim().isEmpty) {
+                sbOptions.dialer?.detour = null;
+              } else {
+                sbOptions.dialer?.detour = value.trim();
+              }
+            },
+            autocompleteCandidates: autocompleteCandidates,
+          ),
+        ),
+      ];
+      List<GroupItem> allOptions = [GroupItem(options: options)];
+
+      allOptions.addAll(await sbOptions.getWidgetOptions(context, setstate));
+      return allOptions;
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        settings: GroupScreen.routeSettings("edit:${sbOptions.type}"),
+        builder: (context) => GroupScreen(
+          title: tcontext.meta.edit,
+          getOptions: getOptions,
+          onDone: (BuildContext context, SetStateCallback? setstate) async {
+            if (!mounted) {
+              return false;
+            }
+            server.tag = sbOptions.tag;
+            server.raw = sbOptions.toJson();
+            server.server = sbOptions.server;
+            server.serverport = sbOptions.server_port;
+            if (item.enable) {
+              ServerManager.setDirty(true);
+            }
+
+            return true;
+          },
+        ),
+      ),
+    );
+    setState(() {});
+  }
+}
