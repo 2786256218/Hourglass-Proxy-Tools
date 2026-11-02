@@ -4,7 +4,7 @@
 
 ## 中文
 
-**Hourglass By ASwave · V1.27.45**
+**Hourglass By ASwave · V1.27.47**
 
 Hourglass 是一款面向 Android 的轻量代理工具，采用简洁的 Liquid Glass 风格界面，基于 sing-box 核心，帮助你管理订阅、节点和网络分流。
 
@@ -33,7 +33,7 @@ APK 输出在 `Android/build/app/outputs/flutter-apk/`。发布正式版本时�
 ### 项目信息
 
 - 作者：ASwave
-- 版本：V1.27.45
+- 版本：V1.27.47
 - GitHub：[Hourglass-Proxy-Tools](https://github.com/2786256218/Hourglass-Proxy-Tools)
 - Android 源码：[Android/](Android/)
 
@@ -43,7 +43,7 @@ APK 输出在 `Android/build/app/outputs/flutter-apk/`。发布正式版本时�
 
 ## English
 
-**Hourglass By ASwave · V1.27.45**
+**Hourglass By ASwave · V1.27.47**
 
 Hourglass is a lightweight Android proxy client with a clean Liquid Glass-inspired interface. Powered by the sing-box core, it helps you manage subscriptions, proxy nodes, and traffic routing.
 
@@ -72,7 +72,7 @@ APK files are written to `Android/build/app/outputs/flutter-apk/`. Use your own 
 ### Project
 
 - Author: ASwave
-- Version: V1.27.45
+- Version: V1.27.47
 - GitHub: [Hourglass-Proxy-Tools](https://github.com/2786256218/Hourglass-Proxy-Tools)
 - Android source: [Android/](Android/)
 

@@ -16,7 +16,7 @@ import 'subscription_support.dart';
 const _ink = Color(0xFF14223A);
 const _blue = Color(0xFF4E8DF5);
 const _mint = Color(0xFF4BCDB0);
-const _appVersion = '1.27.45';
+const _appVersion = '1.27.47';
 const _repositoryUrl = 'https://github.com/2786256218/Hourglass-Proxy-Tools';
 const _routingPrefsKey = 'hourglass.userRoutingRules.v1';
 const _subscriptionGroupsPrefsKey = 'hourglass.subscriptionGroups.v1';
@@ -974,9 +974,64 @@ Future<_GithubRelease?> _fetchLatestRelease() {
   return check.whenComplete(() => _pendingReleaseCheck = null);
 }
 
+Future<({String host, int port, String? username, String? password})?>
+_activeUpdateProxy() async {
+  final engine = SingBox.instance;
+  if (!engine.isConnected) return null;
+  try {
+    final raw = await engine.getLastConfig();
+    final config = raw == null ? null : jsonDecode(raw);
+    if (config is! Map || config['inbounds'] is! List) return null;
+    for (final rawInbound in config['inbounds'] as List) {
+      if (rawInbound is! Map || rawInbound['tag'] != 'hourglass-update-proxy') {
+        continue;
+      }
+      final host = (rawInbound['listen'] ?? '').toString();
+      final port = rawInbound['listen_port'];
+      if (!{'127.0.0.1', '::1', 'localhost'}.contains(host) ||
+          port is! int ||
+          port < 1 ||
+          port > 65535) {
+        return null;
+      }
+      final users = rawInbound['users'];
+      final firstUser = users is List && users.isNotEmpty && users.first is Map
+          ? users.first as Map
+          : null;
+      return (
+        host: host,
+        port: port,
+        username: firstUser?['username']?.toString(),
+        password: firstUser?['password']?.toString(),
+      );
+    }
+  } on Object {
+    // A saved tunnel without the local updater inbound keeps using the normal
+    // network path; new connections add this private loopback proxy.
+  }
+  return null;
+}
+
+Future<void> _configureReleaseHttpClient(HttpClient client) async {
+  final proxy = await _activeUpdateProxy();
+  if (proxy == null) return;
+  client.findProxy = (_) => 'PROXY ${proxy.host}:${proxy.port}';
+  if (proxy.username?.isNotEmpty == true &&
+      proxy.password?.isNotEmpty == true) {
+    final credentials = HttpClientBasicCredentials(
+      proxy.username!,
+      proxy.password!,
+    );
+    for (final realm in const ['', 'sing-box']) {
+      client.addProxyCredentials(proxy.host, proxy.port, realm, credentials);
+    }
+  }
+}
+
 Future<_GithubRelease?> _requestLatestRelease() async {
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
   try {
+    await _configureReleaseHttpClient(client);
     final request = await client
         .getUrl(Uri.parse(_githubLatestReleaseApi))
         .timeout(const Duration(seconds: 15));
@@ -1054,14 +1109,20 @@ bool _isNewerVersion(String candidate, String current) {
   return false;
 }
 
-Future<File> _downloadReleaseApk(_GithubRelease release) async {
+Future<File> _downloadReleaseApk(
+  _GithubRelease release, {
+  void Function(int receivedBytes, int totalBytes)? onProgress,
+}) async {
   final url = release.apkUrl;
   final uri = url == null ? null : Uri.tryParse(url);
   if (uri == null || uri.scheme != 'https' || uri.host != 'github.com') {
     throw const FormatException('此 Release 没有当前设备架构对应的 APK');
   }
   final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+  File? apkFile;
+  var completed = false;
   try {
+    await _configureReleaseHttpClient(client);
     final request = await client
         .getUrl(uri)
         .timeout(const Duration(seconds: 20));
@@ -1070,15 +1131,28 @@ Future<File> _downloadReleaseApk(_GithubRelease release) async {
     if (response.statusCode != HttpStatus.ok) {
       throw HttpException('APK 下载失败，状态码 ${response.statusCode}');
     }
+    final totalBytes = response.contentLength > 0 ? response.contentLength : 0;
+    if (totalBytes > 500 * 1024 * 1024) {
+      throw const FormatException('更新包超过 500 MB');
+    }
     final safeVersion = release.version.replaceAll(
       RegExp(r'[^A-Za-z0-9._-]'),
       '_',
     );
-    final file = File(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}hourglass-update-$safeVersion.apk',
+    final updateDirectory = await _externalLinkChannel.invokeMethod<String>(
+      'getUpdateDirectory',
     );
+    if (updateDirectory == null || updateDirectory.isEmpty) {
+      throw const FileSystemException('无法获取应用更新缓存目录');
+    }
+    final file = File(
+      '$updateDirectory${Platform.pathSeparator}hourglass-update-$safeVersion.apk',
+    );
+    apkFile = file;
+    if (await file.exists()) await file.delete();
     final sink = file.openWrite();
     var size = 0;
+    onProgress?.call(0, totalBytes);
     try {
       await for (final chunk in response.timeout(const Duration(seconds: 45))) {
         size += chunk.length;
@@ -1086,15 +1160,38 @@ Future<File> _downloadReleaseApk(_GithubRelease release) async {
           throw const FormatException('更新包超过 500 MB');
         }
         sink.add(chunk);
+        onProgress?.call(size, totalBytes);
       }
       await sink.flush();
     } finally {
       await sink.close();
     }
-    if (size == 0) throw const FormatException('下载到的 APK 为空');
+    if (size == 0 || size < 64 * 1024) {
+      throw const FormatException('下载文件过小，GitHub 可能未返回 APK');
+    }
+    if (totalBytes > 0 && size != totalBytes) {
+      throw HttpException('APK 下载不完整（$size/$totalBytes 字节）');
+    }
+    final handle = await file.open();
+    try {
+      final header = await handle.read(4);
+      if (header.length < 4 ||
+          header[0] != 0x50 ||
+          header[1] != 0x4B ||
+          header[2] != 0x03 ||
+          header[3] != 0x04) {
+        throw const FormatException('GitHub 返回的文件不是有效 APK');
+      }
+    } finally {
+      await handle.close();
+    }
+    completed = true;
     return file;
   } finally {
     client.close(force: true);
+    if (!completed && apkFile != null && await apkFile.exists()) {
+      await apkFile.delete();
+    }
   }
 }
 
@@ -1112,30 +1209,77 @@ Future<void> _downloadAndInstallRelease(
     return;
   }
   var progressShown = false;
+  var receivedBytes = 0;
+  var totalBytes = 0;
+  var lastProgressBytes = 0;
+  var lastProgressPercent = -1;
+  var lastProgressUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+  StateSetter? updateProgressDialog;
   showDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (dialogContext) => Dialog(
-      backgroundColor: Colors.transparent,
-      child: _Glass(
-        padding: const EdgeInsets.all(24),
-        child: Row(
-          children: [
-            const SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator.adaptive(strokeWidth: 2.5),
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (dialogContext, setDialogState) {
+        updateProgressDialog = setDialogState;
+        final progress = totalBytes > 0
+            ? (receivedBytes / totalBytes).clamp(0.0, 1.0)
+            : null;
+        String formatMegabytes(int value) =>
+            '${(value / (1024 * 1024)).toStringAsFixed(1)} MB';
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: _Glass(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('正在下载 Hourglass ${release.version}…'),
+                const SizedBox(height: 16),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LinearProgressIndicator(value: progress, minHeight: 8),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  totalBytes > 0
+                      ? '${formatMegabytes(receivedBytes)} / ${formatMegabytes(totalBytes)}'
+                      : '${formatMegabytes(receivedBytes)} 已下载',
+                  style: const TextStyle(
+                    color: Color(0xFF64758C),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 16),
-            Expanded(child: Text('正在下载 Hourglass ${release.version}…')),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     ),
   );
   progressShown = true;
   try {
-    final apk = await _downloadReleaseApk(release);
+    final apk = await _downloadReleaseApk(
+      release,
+      onProgress: (received, total) {
+        receivedBytes = received;
+        totalBytes = total;
+        final now = DateTime.now();
+        final percent = total > 0 ? received * 100 ~/ total : -1;
+        final shouldUpdate =
+            (total > 0 && percent != lastProgressPercent) ||
+            received - lastProgressBytes >= 512 * 1024 ||
+            (received == total && total > 0) ||
+            now.difference(lastProgressUpdate) >=
+                const Duration(milliseconds: 250);
+        if (shouldUpdate) {
+          lastProgressBytes = received;
+          lastProgressPercent = percent;
+          lastProgressUpdate = now;
+          if (context.mounted) updateProgressDialog?.call(() {});
+        }
+      },
+    );
     if (!context.mounted) return;
     if (progressShown) Navigator.of(context, rootNavigator: true).pop();
     progressShown = false;
@@ -1177,7 +1321,7 @@ Future<void> _showReleaseUpdateDialog(
               ),
               const SizedBox(height: 9),
               Text(
-                'Hourglass ${release.version} 已发布。将下载本机对应的 ${release.apkAssetName ?? 'APK'}，不会误选其他架构版本。',
+                'Hourglass ${release.version} 已发布。将下载适用于当前设备的 ${release.apkAssetName ?? 'APK'}。',
                 style: const TextStyle(color: Color(0xFF64758C), height: 1.5),
               ),
               const SizedBox(height: 20),
@@ -2180,6 +2324,26 @@ class _ProxyHomePageState extends State<ProxyHomePage>
             if (inboundAuth.isNotEmpty) 'users': inboundAuth,
           });
         }
+      }
+      if (Platform.isAndroid) {
+        final reservedPort = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+        final updateProxyPort = reservedPort.port;
+        await reservedPort.close();
+        final updateProxyPassword = base64Url
+            .encode(List<int>.generate(24, (_) => Random.secure().nextInt(256)))
+            .replaceAll('=', '');
+        inbounds.add({
+          'type': 'mixed',
+          'tag': 'hourglass-update-proxy',
+          'listen': '127.0.0.1',
+          'listen_port': updateProxyPort,
+          'users': [
+            {'username': 'hourglass-update', 'password': updateProxyPassword},
+          ],
+        });
       }
       await _engine.connect(
         jsonEncode(config),

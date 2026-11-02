@@ -146,6 +146,9 @@ class MainActivity : FlutterActivity() {
                             ) ?: Build.SUPPORTED_ABIS.firstNotNullOfOrNull(::normalizeAbi)
                             result.success(installedAbi)
                         }
+                        "getUpdateDirectory" -> {
+                            result.success(cacheDir.canonicalPath)
+                        }
                         "installApk" -> {
                             val path = call.argument<String>("path")
                                 ?: throw IllegalArgumentException("Missing APK path")
@@ -156,6 +159,10 @@ class MainActivity : FlutterActivity() {
                                 !file.isFile || file.length() == 0L || !file.name.endsWith(".apk", true)
                             ) {
                                 result.error("invalid_apk", "更新文件无效", null)
+                                return@setMethodCallHandler
+                            }
+                            if (readApkPackageName(file) != packageName) {
+                                result.error("invalid_apk", "下载文件不是有效的 Hourglass 安装包", null)
                                 return@setMethodCallHandler
                             }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -198,7 +205,7 @@ class MainActivity : FlutterActivity() {
                 return
             }
             try {
-                if (file == null || !file.isFile) {
+                if (file == null || !file.isFile || readApkPackageName(file) != packageName) {
                     callback.error("missing_apk", "更新安装包不存在，请重新下载", null)
                 } else {
                     launchApkInstaller(file)
@@ -261,6 +268,17 @@ class MainActivity : FlutterActivity() {
         }
         startActivity(intent)
     }
+
+    @Suppress("DEPRECATION")
+    private fun readApkPackageName(file: File): String? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageArchiveInfo(
+                file.path,
+                PackageManager.PackageInfoFlags.of(0),
+            )?.packageName
+        } else {
+            packageManager.getPackageArchiveInfo(file.path, 0)?.packageName
+        }
 
     private fun normalizeAbi(value: String?): String? = when (value?.lowercase()) {
         "arm64", "arm64-v8a" -> "arm64-v8a"
