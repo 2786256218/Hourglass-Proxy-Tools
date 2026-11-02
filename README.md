@@ -8,6 +8,8 @@
 
 Hourglass 是一款面向 Android 的轻量代理工具，采用简洁的 Liquid Glass 风格界面，基于 sing-box 核心，帮助你管理订阅、节点和网络分流。
 
+Android 端完整 Flutter 工程源码位于仓库的 [Android/](Android/) 目录。后续平台适配可在仓库根目录并列新增对应平台目录。
+
 ### 功能
 
 - 支持 HTTPS 在线订阅、代理分享链接，以及本地 YAML、YML、YAM 配置文件
@@ -21,17 +23,19 @@ Hourglass 是一款面向 Android 的轻量代理工具，采用简洁的 Liquid
 需要 Flutter 3.44 或更高版本、JDK 21 和 Android SDK。在项目根目录执行：
 
 ```powershell
+cd Android
 flutter pub get
-flutter build apk --debug --split-per-abi --target-platform android-arm,android-arm64
+flutter build apk --release --split-per-abi
 ```
 
-APK 输出在 `build/app/outputs/flutter-apk/`。发布正式版本时请使用自己的签名密钥；不要将签名密钥或 `android/key.properties` 上传到仓库。
+APK 输出在 `Android/build/app/outputs/flutter-apk/`。发布正式版本时请使用自己的签名密钥；不要将签名密钥或 `Android/android/key.properties` 上传到仓库。
 
 ### 项目信息
 
 - 作者：ASwave
 - 版本：V1.27.45
 - GitHub：[Hourglass-Proxy-Tools](https://github.com/2786256218/Hourglass-Proxy-Tools)
+- Android 源码：[Android/](Android/)
 
 ### 许可证
 
@@ -42,6 +46,8 @@ APK 输出在 `build/app/outputs/flutter-apk/`。发布正式版本时请使用�
 **Hourglass By ASwave · V1.27.45**
 
 Hourglass is a lightweight Android proxy client with a clean Liquid Glass-inspired interface. Powered by the sing-box core, it helps you manage subscriptions, proxy nodes, and traffic routing.
+
+The complete Android Flutter project is in the repository's [Android/](Android/) directory. Future platform adaptations can be added as sibling directories at the repository root.
 
 ### Features
 
@@ -56,17 +62,19 @@ Hourglass is a lightweight Android proxy client with a clean Liquid Glass-inspir
 Requirements: Flutter 3.44 or later, JDK 21, and the Android SDK. From the project root, run:
 
 ```powershell
+cd Android
 flutter pub get
-flutter build apk --debug --split-per-abi --target-platform android-arm,android-arm64
+flutter build apk --release --split-per-abi
 ```
 
-APK files are written to `build/app/outputs/flutter-apk/`. Use your own signing key for release builds. Do not commit signing keys or `android/key.properties` to the repository.
+APK files are written to `Android/build/app/outputs/flutter-apk/`. Use your own signing key for release builds. Do not commit signing keys or `Android/android/key.properties` to the repository.
 
 ### Project
 
 - Author: ASwave
 - Version: V1.27.45
 - GitHub: [Hourglass-Proxy-Tools](https://github.com/2786256218/Hourglass-Proxy-Tools)
+- Android source: [Android/](Android/)
 
 ### License
 
