@@ -16,7 +16,7 @@ import 'subscription_support.dart';
 const _ink = Color(0xFF14223A);
 const _blue = Color(0xFF4E8DF5);
 const _mint = Color(0xFF4BCDB0);
-const _appVersion = '1.27.47';
+const _appVersion = '1.27.48';
 const _repositoryUrl = 'https://github.com/2786256218/Hourglass-Proxy-Tools';
 const _routingPrefsKey = 'hourglass.userRoutingRules.v1';
 const _subscriptionGroupsPrefsKey = 'hourglass.subscriptionGroups.v1';

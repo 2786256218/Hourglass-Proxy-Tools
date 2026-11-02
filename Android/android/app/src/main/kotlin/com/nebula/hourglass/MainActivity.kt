@@ -153,16 +153,9 @@ class MainActivity : FlutterActivity() {
                             val path = call.argument<String>("path")
                                 ?: throw IllegalArgumentException("Missing APK path")
                             val file = File(path).canonicalFile
-                            val cacheRoot = cacheDir.canonicalPath + File.separator
-                            val filesRoot = filesDir.canonicalPath + File.separator
-                            if ((!file.path.startsWith(cacheRoot) && !file.path.startsWith(filesRoot)) ||
-                                !file.isFile || file.length() == 0L || !file.name.endsWith(".apk", true)
-                            ) {
-                                result.error("invalid_apk", "更新文件无效", null)
-                                return@setMethodCallHandler
-                            }
-                            if (readApkPackageName(file) != packageName) {
-                                result.error("invalid_apk", "下载文件不是有效的 Hourglass 安装包", null)
+                            val validationError = validateUpdateApk(file)
+                            if (validationError != null) {
+                                result.error(validationError.first, validationError.second, null)
                                 return@setMethodCallHandler
                             }
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -205,11 +198,16 @@ class MainActivity : FlutterActivity() {
                 return
             }
             try {
-                if (file == null || !file.isFile || readApkPackageName(file) != packageName) {
+                if (file == null) {
                     callback.error("missing_apk", "更新安装包不存在，请重新下载", null)
                 } else {
-                    launchApkInstaller(file)
-                    callback.success(true)
+                    val validationError = validateUpdateApk(file)
+                    if (validationError != null) {
+                        callback.error(validationError.first, validationError.second, null)
+                    } else {
+                        launchApkInstaller(file)
+                        callback.success(true)
+                    }
                 }
             } catch (_: Exception) {
                 callback.error("install_apk", "无法启动系统安装器", null)
@@ -269,15 +267,49 @@ class MainActivity : FlutterActivity() {
         startActivity(intent)
     }
 
+    private fun validateUpdateApk(file: File): Pair<String, String>? {
+        val cacheRoot = cacheDir.canonicalPath + File.separator
+        val filesRoot = filesDir.canonicalPath + File.separator
+        if (!file.path.startsWith(cacheRoot) && !file.path.startsWith(filesRoot)) {
+            return "invalid_apk" to "更新文件不在应用安全缓存目录中，请重新下载"
+        }
+        if (!file.isFile || file.length() == 0L || !file.name.endsWith(".apk", true)) {
+            return "invalid_apk" to "更新文件不存在或为空，请重新下载"
+        }
+        val apkInfo = readApkInfo(file)
+            ?: return "invalid_apk" to "下载文件无法解析为 APK，请检查 Release 中的安装包"
+        if (apkInfo.packageName != packageName) {
+            return "invalid_apk" to "下载的 APK 包名不匹配：${apkInfo.packageName}"
+        }
+        val installedInfo = readInstalledPackageInfo()
+            ?: return "install_info" to "无法读取当前应用版本信息"
+        if (apkInfo.longVersionCode <= installedInfo.longVersionCode) {
+            return "version_not_newer" to
+                "Release 标签较新，但 APK 内部版本码未增加（当前 ${installedInfo.longVersionCode}，下载 ${apkInfo.longVersionCode}）。请重新构建并替换该 Release 的 APK。"
+        }
+        return null
+    }
+
     @Suppress("DEPRECATION")
-    private fun readApkPackageName(file: File): String? =
+    private fun readApkInfo(file: File) =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             packageManager.getPackageArchiveInfo(
                 file.path,
                 PackageManager.PackageInfoFlags.of(0),
-            )?.packageName
+            )
         } else {
-            packageManager.getPackageArchiveInfo(file.path, 0)?.packageName
+            packageManager.getPackageArchiveInfo(file.path, 0)
+        }
+
+    @Suppress("DEPRECATION")
+    private fun readInstalledPackageInfo() =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(
+                packageName,
+                PackageManager.PackageInfoFlags.of(0),
+            )
+        } else {
+            packageManager.getPackageInfo(packageName, 0)
         }
 
     private fun normalizeAbi(value: String?): String? = when (value?.lowercase()) {
