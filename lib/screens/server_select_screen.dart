@@ -184,6 +184,22 @@ class _ServerSelectScreenState extends LasyRenderingState<ServerSelectScreen> {
       _buildData();
       setState(() {});
     });
+    ServerManager.onEventUpdateConfig(hashCode, (items) async {
+      if (!mounted) {
+        return;
+      }
+      _loadRecommend();
+      _buildData();
+      setState(() {});
+    });
+    ServerManager.onEventServerListChanged(hashCode, () {
+      if (!mounted) {
+        return;
+      }
+      _loadRecommend();
+      _buildData();
+      setState(() {});
+    });
 
     _timer ??= Timer.periodic(const Duration(seconds: 1), (timer) async {
       if (_rePaint) {

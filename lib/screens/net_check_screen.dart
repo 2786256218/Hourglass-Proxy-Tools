@@ -1066,9 +1066,14 @@ class _NetCheckScreenState extends LasyRenderingState<NetCheckScreen> {
         _domainAndPort.item1;
     _disconnectLog();
     _connectLog();
-    bool ok = await startVPN();
-    if (!ok) {
-      return;
+    // Connectivity checks must observe the active tunnel as-is. Calling the
+    // dirty-config restart path while connected can re-apply a stale selected
+    // outbound and silently switch the node before the Google check runs.
+    if (!await VPNService.getStarted()) {
+      final ok = await startVPN();
+      if (!ok) {
+        return;
+      }
     }
     _checking = true;
     List<Future<bool> Function()> callbacks = [

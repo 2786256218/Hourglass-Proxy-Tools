@@ -1225,6 +1225,7 @@ class MyProfilesScreenState extends LasyRenderingState<MyProfilesScreen> {
                     !item.proxyFilterRemove.contains(server.tag)) {
                   item.proxyFilterRemove.add(server.tag);
                 }
+                ServerManager.notifyServerListChanged();
                 _buildData();
                 setState(() {});
                 break;

@@ -7,13 +7,16 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.security.KeyStore
+import java.io.File
 import java.io.ByteArrayOutputStream
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -26,6 +29,8 @@ class MainActivity : FlutterActivity() {
     private val localFilesChannel = "hourglass.local_files"
     private val externalLinksChannel = "hourglass.external_links"
     private var pendingFilePickerResult: MethodChannel.Result? = null
+    private var pendingInstallResult: MethodChannel.Result? = null
+    private var pendingInstallFile: File? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -124,20 +129,56 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, externalLinksChannel)
             .setMethodCallHandler { call, result ->
-                if (call.method != "openUrl") {
-                    result.notImplemented()
-                    return@setMethodCallHandler
-                }
                 try {
-                    val uri = Uri.parse(call.argument<String>("url") ?: "")
-                    if (uri.scheme != "https" || uri.host.isNullOrBlank()) {
-                        result.error("invalid_url", "仅允许打开 HTTPS 仓库地址", null)
-                        return@setMethodCallHandler
+                    when (call.method) {
+                        "openUrl" -> {
+                            val uri = Uri.parse(call.argument<String>("url") ?: "")
+                            if (uri.scheme != "https" || uri.host.isNullOrBlank()) {
+                                result.error("invalid_url", "仅允许打开 HTTPS 仓库地址", null)
+                                return@setMethodCallHandler
+                            }
+                            startActivity(Intent(Intent.ACTION_VIEW, uri))
+                            result.success(true)
+                        }
+                        "getInstalledAbi" -> {
+                            val installedAbi = normalizeAbi(
+                                applicationInfo.nativeLibraryDir?.substringAfterLast('/')
+                            ) ?: Build.SUPPORTED_ABIS.firstNotNullOfOrNull(::normalizeAbi)
+                            result.success(installedAbi)
+                        }
+                        "installApk" -> {
+                            val path = call.argument<String>("path")
+                                ?: throw IllegalArgumentException("Missing APK path")
+                            val file = File(path).canonicalFile
+                            val cacheRoot = cacheDir.canonicalPath + File.separator
+                            val filesRoot = filesDir.canonicalPath + File.separator
+                            if ((!file.path.startsWith(cacheRoot) && !file.path.startsWith(filesRoot)) ||
+                                !file.isFile || file.length() == 0L || !file.name.endsWith(".apk", true)
+                            ) {
+                                result.error("invalid_apk", "更新文件无效", null)
+                                return@setMethodCallHandler
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                                !packageManager.canRequestPackageInstalls()
+                            ) {
+                                pendingInstallResult = result
+                                pendingInstallFile = file
+                                startActivityForResult(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                        Uri.parse("package:$packageName"),
+                                    ),
+                                    REQUEST_INSTALL_PERMISSION,
+                                )
+                            } else {
+                                launchApkInstaller(file)
+                                result.success(true)
+                            }
+                        }
+                        else -> result.notImplemented()
                     }
-                    startActivity(Intent(Intent.ACTION_VIEW, uri))
-                    result.success(true)
                 } catch (_: Exception) {
-                    result.error("open_url", "无法打开仓库链接", null)
+                    result.error("external_action", "无法打开链接或安装更新", null)
                 }
             }
     }
@@ -145,6 +186,29 @@ class MainActivity : FlutterActivity() {
     @Deprecated("Deprecated in Android")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_INSTALL_PERMISSION) {
+            val callback = pendingInstallResult ?: return
+            val file = pendingInstallFile
+            pendingInstallResult = null
+            pendingInstallFile = null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !packageManager.canRequestPackageInstalls()
+            ) {
+                callback.error("install_permission", "未授予安装未知应用权限", null)
+                return
+            }
+            try {
+                if (file == null || !file.isFile) {
+                    callback.error("missing_apk", "更新安装包不存在，请重新下载", null)
+                } else {
+                    launchApkInstaller(file)
+                    callback.success(true)
+                }
+            } catch (_: Exception) {
+                callback.error("install_apk", "无法启动系统安装器", null)
+            }
+            return
+        }
         if (requestCode != REQUEST_YAML_FILE) return
         val callback = pendingFilePickerResult ?: return
         pendingFilePickerResult = null
@@ -185,6 +249,26 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun launchApkInstaller(file: File) {
+        val uri = FileProvider.getUriForFile(
+            this,
+            "$packageName.fileprovider",
+            file,
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
+    }
+
+    private fun normalizeAbi(value: String?): String? = when (value?.lowercase()) {
+        "arm64", "arm64-v8a" -> "arm64-v8a"
+        "arm", "armeabi-v7a" -> "armeabi-v7a"
+        "x86_64", "x64" -> "x86_64"
+        else -> null
+    }
+
     private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, storageKey())
@@ -221,6 +305,7 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val REQUEST_YAML_FILE = 8321
+        const val REQUEST_INSTALL_PERMISSION = 8322
         const val MAX_YAML_BYTES = 16 * 1024 * 1024
         const val ENCRYPTED_PREFIX = "HGUSER1:"
         const val KEY_ALIAS = "hourglass.user.secrets.v1"

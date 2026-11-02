@@ -75,6 +75,7 @@ import 'package:hourglass/screens/settings_screen.dart';
 import 'package:hourglass/screens/themes.dart';
 import 'package:hourglass/screens/tv_mode_screen.dart';
 import 'package:hourglass/screens/user_agreement_screen.dart';
+import 'package:hourglass/screens/version_update_screen.dart';
 import 'package:hourglass/screens/webview_helper.dart';
 import 'package:hourglass/screens/widgets/fab2.dart';
 import 'package:hourglass/screens/widgets/framework.dart';
@@ -225,6 +226,7 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
   late HomeWidgetOptions _widgetOptions;
 
   bool _working = false;
+  bool _serverSelectionInProgress = false;
   FlutterVpnServiceState _state = FlutterVpnServiceState.disconnected;
 
   Timer? _timerStateChecker;
@@ -235,6 +237,7 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
   ProxyConfig _currentServer = ProxyConfig();
 
   bool _onInitAllFinished = false;
+  String _promptedUpdateVersion = "";
   String _initUrl = "";
   bool _edit = false;
   QuickActions? _quickActions;
@@ -968,6 +971,25 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
     }
   }
 
+  void _onUpdateCheckCompleted() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+    final update = AutoUpdateManager.getVersionCheck();
+    if (!update.newVersion ||
+        update.version.isEmpty ||
+        update.version == _promptedUpdateVersion) {
+      return;
+    }
+    _promptedUpdateVersion = update.version;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        VersionUpdateScreen.showUpdatePrompt(context);
+      }
+    });
+  }
+
   Future<void> _onInitAllFinish() async {
     NoticeManager.onEventCheck.add(() {
       setState(() {});
@@ -975,9 +997,8 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
     BoardProviderNoticeManager.onEventCheck.add(() {
       setState(() {});
     });
-    AutoUpdateManager.onEventCheck.add(() {
-      setState(() {});
-    });
+    AutoUpdateManager.onEventCheck.add(_onUpdateCheckCompleted);
+    _onUpdateCheckCompleted();
     DialogUtils.faqCallback = (BuildContext context, String text) async {
       CommonDialog.loadFAQByError(context, text, true);
     };
@@ -1486,7 +1507,17 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
     ReturnResultError? resultError;
     if (_currentServer.groupid.isEmpty) {
       _currentServer = ServerManager.getUrltest();
+    } else if (_currentServer.groupid != ServerManager.getUrltestGroupId() &&
+        _currentServer.groupid != ServerManager.getDirectGroupId() &&
+        _currentServer.groupid != ServerManager.getBlockGroupId()) {
+      _currentServer =
+          ServerManager.getConfig().getByGroupIdAndTag(
+            _currentServer.groupid,
+            _currentServer.tag,
+          ) ??
+          _currentServer;
     }
+    VPNService.setCurrent(_currentServer);
     try {
       resultError = await VPNService.setServer(
         _currentServer,
@@ -1548,7 +1579,7 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
         );
       }
     }
-    if (_state != FlutterVpnServiceState.connected) {
+    if (await VPNService.getState() != FlutterVpnServiceState.connected) {
       return null;
     }
 
@@ -2063,52 +2094,79 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
   }
 
   Future<void> onTapServerSelect() async {
-    ProxyConfig? result = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        settings: ServerSelectScreen.routeSettings(),
-        builder: (context) => ServerSelectScreen(
-          singleSelect: ServerSelectScreenSingleSelectedOption(
-            selectedServer: _currentServer,
-            showAutoSelect: true,
-            showDirect: true,
-            showUrltestGroup: true,
-          ),
-          multiSelect: null,
-          autoUpdateLatencyHistory:
-              _currentServer.groupid == ServerManager.getUrltestGroupId(),
-        ),
-      ),
-    );
-    if (result != null) {
-      if (!_currentServer.isSame(result) || ServerManager.getDirty()) {
-        _currentServer = result;
-        _currentServerForUrltest.clear();
-        VPNService.setCurrentServerForUrltest(_currentServerForUrltest);
-        ServerManager.addRecent(result);
-        var use = ServerManager.getUse();
-        if (use.selectDefault != result.tag &&
-            result.latency.isNotEmpty &&
-            int.tryParse(result.latency) != null &&
-            result.type != kOutboundTypeUrltest) {
-          use.selectDefault = result.tag;
-        }
-        await setServerAndReload("ServerSelectScreen");
-      } else {
-        _currentServer = result;
-      }
-      VPNService.setCurrent(_currentServer);
+    if (_serverSelectionInProgress) {
+      return;
     }
-    ServerManager.setDirty(false);
-    ServerManager.setUpdateDirty(false);
-    setState(() {});
+    _serverSelectionInProgress = true;
+    try {
+      ProxyConfig? result = await Navigator.push(
+        context,
+        MaterialPageRoute(
+          settings: ServerSelectScreen.routeSettings(),
+          builder: (context) => ServerSelectScreen(
+            singleSelect: ServerSelectScreenSingleSelectedOption(
+              selectedServer: _currentServer,
+              showAutoSelect: true,
+              showDirect: true,
+              showUrltestGroup: true,
+            ),
+            multiSelect: null,
+            autoUpdateLatencyHistory:
+                _currentServer.groupid == ServerManager.getUrltestGroupId(),
+          ),
+        ),
+      );
+      if (result != null) {
+        ProxyConfig selected = result;
+        if (result.groupid != ServerManager.getUrltestGroupId() &&
+            result.groupid != ServerManager.getDirectGroupId() &&
+            result.groupid != ServerManager.getBlockGroupId()) {
+          selected =
+              ServerManager.getConfig().getByGroupIdAndTag(
+                result.groupid,
+                result.tag,
+              ) ??
+              result;
+        }
+
+        final changed =
+            _currentServer.groupid != selected.groupid ||
+            _currentServer.tag != selected.tag ||
+            _currentServer.type != selected.type;
+        _currentServer = selected;
+        VPNService.setCurrent(_currentServer);
+        if (changed || ServerManager.getDirty()) {
+          _currentServerForUrltest.clear();
+          VPNService.setCurrentServerForUrltest(_currentServerForUrltest);
+          ServerManager.addRecent(selected);
+          final use = ServerManager.getUse();
+          if (use.selectDefault != selected.tag &&
+              selected.latency.isNotEmpty &&
+              int.tryParse(selected.latency) != null &&
+              selected.type != kOutboundTypeUrltest) {
+            use.selectDefault = selected.tag;
+          }
+          await ServerManager.saveUse();
+          await setServerAndReload("ServerSelectScreen");
+        } else {
+          await ServerManager.saveUse();
+        }
+      }
+      ServerManager.setDirty(false);
+      ServerManager.setUpdateDirty(false);
+      if (mounted) {
+        setState(() {});
+      }
+    } finally {
+      _serverSelectionInProgress = false;
+    }
   }
 
   Future<ReturnResultError?> checkAndReload(
     String from, {
     bool disableShowAlertDialog = false,
   }) async {
-    if (_state != FlutterVpnServiceState.connected) {
+    if (await VPNService.getState() != FlutterVpnServiceState.connected) {
       return null;
     }
     if (SettingManager.getDirty() || ServerManager.getDirty()) {
@@ -2136,6 +2194,9 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
   }
 
   Future<ReturnResultError?> onTapToggle(String from) async {
+    if (_serverSelectionInProgress) {
+      return null;
+    }
     bool started = await VPNService.getStarted();
     if (started) {
       await stop();
@@ -2493,6 +2554,7 @@ class _HomeScreenState extends LasyRenderingState<HomeScreen>
     _focusNodeBackupAndSync.dispose();
 
     VPNService.onEventStateChanged.remove(_onStateChanged);
+    AutoUpdateManager.onEventCheck.remove(_onUpdateCheckCompleted);
     ServerManager.removeListener(hashCode);
     AppLifecycleStateNofity.onStateResumed(hashCode, null);
     AppLifecycleStateNofity.onStatePaused(hashCode, null);

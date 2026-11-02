@@ -9,7 +9,6 @@ import 'package:hourglass/app/modules/setting_manager.dart';
 import 'package:hourglass/app/runtime/return_result.dart';
 import 'package:hourglass/app/utils/app_lifecycle_state_notify.dart';
 import 'package:hourglass/app/utils/app_utils.dart';
-import 'package:hourglass/app/utils/auto_update_utils.dart';
 import 'package:hourglass/app/utils/crypto_utils.dart';
 import 'package:hourglass/app/utils/download_utils.dart';
 import 'package:hourglass/app/utils/file_utils.dart';
@@ -26,6 +25,8 @@ class AutoUpdateCheckVersion {
   bool newVersion = false;
   String version = "";
   String url = "";
+  String releaseUrl =
+      "https://github.com/2786256218/Hourglass-Proxy-Tools/releases";
 
   String sha256 = "";
   Map<String, dynamic> toJson() => {
@@ -33,6 +34,7 @@ class AutoUpdateCheckVersion {
     'new_version': newVersion,
     "version": version,
     "url": url,
+    "release_url": releaseUrl,
     "sha256": sha256,
   };
   void fromJson(Map<String, dynamic>? map) {
@@ -43,6 +45,7 @@ class AutoUpdateCheckVersion {
     newVersion = map["new_version"] ?? "";
     version = map["version"] ?? "";
     url = map["url"] ?? "";
+    releaseUrl = map["release_url"] ?? releaseUrl;
     sha256 = map["sha256"] ?? "";
   }
 
@@ -90,18 +93,22 @@ class AutoUpdateCheckVersion {
     newVersion = false;
     version = "";
     url = "";
+    releaseUrl = "https://github.com/2786256218/Hourglass-Proxy-Tools/releases";
     sha256 = "";
   }
 }
 
 class AutoUpdateManager {
+  static const String _releaseApiUrl =
+      "https://api.github.com/repos/2786256218/Hourglass-Proxy-Tools/releases/latest";
+  static const String _releasesPageUrl =
+      "https://github.com/2786256218/Hourglass-Proxy-Tools/releases";
   static final List<void Function()> onEventCheck = [];
   static Timer? _timerChecker;
   static bool _checking = false;
   static final FileSaver _fileSaver = FileSaver();
   static bool _downloading = false;
   static Duration _duration = const Duration(hours: 3);
-  static DateTime? _lastCheck;
   static final AutoUpdateCheckVersion _versionCheck = AutoUpdateCheckVersion();
 
   static bool isSupport() {
@@ -120,7 +127,10 @@ class AutoUpdateManager {
     await load();
     String version = AppUtils.getBuildinVersion();
 
-    if (VersionCompareUtils.compareVersion(version, _versionCheck.version) >=
+    if (VersionCompareUtils.compareVersion(
+          _normalizeVersion(version),
+          _normalizeVersion(_versionCheck.version),
+        ) >=
         0) {
       if (_versionCheck.version.isNotEmpty) {
         if (isSupport()) {
@@ -177,6 +187,9 @@ class AutoUpdateManager {
     return _versionCheck;
   }
 
+  static Future<UpdateCheckStatus> checkNow({bool notify = true}) =>
+      _check(force: true, notify: notify);
+
   static Future<void> load() async {
     String filePath = await PathUtils.autoUpdateFilePath();
     var file = File(filePath);
@@ -209,7 +222,10 @@ class AutoUpdateManager {
     if (downloadPath.isEmpty) {
       return null;
     }
-    if (VersionCompareUtils.compareVersion(version, _versionCheck.version) <
+    if (VersionCompareUtils.compareVersion(
+          _normalizeVersion(version),
+          _normalizeVersion(_versionCheck.version),
+        ) <
         0) {
       var file = File(downloadPath);
       bool exist = await file.exists();
@@ -222,8 +238,8 @@ class AutoUpdateManager {
     return null;
   }
 
-  static Future<void> download() async {
-    if (!SettingManager.getConfig().autoDownloadUpdatePkg) {
+  static Future<void> download({bool force = false}) async {
+    if (!force && !SettingManager.getConfig().autoDownloadUpdatePkg) {
       return;
     }
     if (!isSupport()) {
@@ -234,6 +250,11 @@ class AutoUpdateManager {
     }
     if (_versionCheck.version.isEmpty || _versionCheck.url.isEmpty) {
       return;
+    }
+    if (_downloading && force) {
+      for (var attempt = 0; attempt < 600 && _downloading; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
     }
     if (_downloading) {
       return;
@@ -248,8 +269,14 @@ class AutoUpdateManager {
     } else {
       ports = await VPNService.getPortsByPrefer(true);
     }
+    if (ports.isEmpty) {
+      ports = [null];
+    }
     String version = AppUtils.getBuildinVersion();
-    if (VersionCompareUtils.compareVersion(version, _versionCheck.version) <
+    if (VersionCompareUtils.compareVersion(
+          _normalizeVersion(version),
+          _normalizeVersion(_versionCheck.version),
+        ) <
         0) {
       String downloadPath = await _versionCheck.getDownloadPath();
       if (downloadPath.isEmpty) {
@@ -275,40 +302,43 @@ class AutoUpdateManager {
         return;
       }
       _downloading = true;
-      late ReturnResult<HttpHeaders> result;
-      for (var port in ports) {
-        result = await DownloadUtils.downloadWithPort(
-          uri,
-          downloadPath,
-          null,
-          false,
-          port,
-        );
-        if (result.error == null) {
-          break;
-        }
-      }
-
-      if (result.error != null) {
-        if (result.error!.message.contains("404")) {
-          _versionCheck.newVersion = false;
-          _versionCheck.version = "";
-          _versionCheck.url = "";
-          _versionCheck.sha256 = "";
-
-          save();
-        }
-      }
-      if (_versionCheck.sha256.isNotEmpty) {
-        final hash = await CryptoUtils.getFileSha256(downloadPath);
-        if (hash != null) {
-          if (_versionCheck.sha256 != hash) {
-            await FileUtils.deletePath(downloadPath);
+      try {
+        late ReturnResult<HttpHeaders> result;
+        for (var port in ports) {
+          result = await DownloadUtils.downloadWithPort(
+            uri,
+            downloadPath,
+            null,
+            false,
+            port,
+          );
+          if (result.error == null) {
+            break;
           }
         }
+
+        if (result.error != null) {
+          if (result.error!.message.contains("404")) {
+            _versionCheck.newVersion = false;
+            _versionCheck.version = "";
+            _versionCheck.url = "";
+            _versionCheck.sha256 = "";
+
+            save();
+          }
+        }
+        if (_versionCheck.sha256.isNotEmpty) {
+          final hash = await CryptoUtils.getFileSha256(downloadPath);
+          if (hash != null) {
+            if (_versionCheck.sha256 != hash) {
+              await FileUtils.deletePath(downloadPath);
+            }
+          }
+        }
+        await _sanitizeMacOSInstaller(downloadPath);
+      } finally {
+        _downloading = false;
       }
-      await _sanitizeMacOSInstaller(downloadPath);
-      _downloading = false;
       Future.delayed(const Duration(milliseconds: 300), () async {
         for (var callback in onEventCheck) {
           callback();
@@ -356,115 +386,172 @@ class AutoUpdateManager {
     }
   }
 
-  static Future<void> _check() async {
+  static Future<UpdateCheckStatus> _check({
+    bool force = false,
+    bool notify = true,
+  }) async {
     if (_checking) {
-      return;
+      for (var attempt = 0; attempt < 100 && _checking; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      return _checking
+          ? UpdateCheckStatus.failed
+          : (_versionCheck.newVersion
+                ? UpdateCheckStatus.available
+                : UpdateCheckStatus.upToDate);
     }
     if (SettingManager.getConfig().checkByProxy) {
       final started = await VPNService.getStarted();
       if (!started) {
-        return;
+        return UpdateCheckStatus.failed;
       }
       if (VPNService.currentIsDirect()) {
-        return;
+        return UpdateCheckStatus.failed;
       }
     }
     var last = DateTime.tryParse(_versionCheck.latestCheck);
     DateTime now = DateTime.now();
-    if (last != null) {
+    if (!force && last != null) {
       Duration dur = now.difference(last);
       if (dur.inSeconds < _duration.inSeconds) {
         await download();
-        return;
+        return _versionCheck.newVersion
+            ? UpdateCheckStatus.available
+            : UpdateCheckStatus.upToDate;
       }
-    }
-    var autoUpdateChannel = SettingManager.getConfig().autoUpdateChannel;
-    if (!updateChannels().contains(autoUpdateChannel)) {
-      autoUpdateChannel = "stable";
     }
     _versionCheck.latestCheck = now.toString();
     _checking = true;
+    HttpClient? client;
     try {
-      bool body =
-          _lastCheck == null ||
-          DateTime.now().difference(_lastCheck!).inHours > 12;
-      ReturnResult<List<AutoupdateItem>> items =
-          await AutoupdateUtils.getAutoupdate(
-            body,
-            SettingManager.getConfig().checkByProxy,
-          );
-      _lastCheck = DateTime.now();
-      if (items.error != null) {
-        _checking = false;
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+      final request = await client.getUrl(Uri.parse(_releaseApiUrl));
+      request.headers.set(
+        HttpHeaders.acceptHeader,
+        "application/vnd.github+json",
+      );
+      request.headers.set(HttpHeaders.userAgentHeader, "Hourglass-Proxy-Tools");
+      final response = await request.close().timeout(
+        const Duration(seconds: 20),
+      );
+      if (response.statusCode != HttpStatus.ok) {
+        await response.drain<void>();
+        client.close(force: true);
         _duration = const Duration(minutes: 10);
-        save();
-        return;
-      }
-      _duration = const Duration(hours: 3);
-      if (items.data!.isNotEmpty) {
-        final abis = VPNService.getABIs();
-
-        String channel = await InstallReferrerUtils.getString();
-        String version = AppUtils.getBuildinVersion();
-
-        _versionCheck.newVersion = false;
-        _versionCheck.version = "";
-        _versionCheck.url = "";
-        _versionCheck.sha256 = "";
-
-        for (var item in items.data!) {
-          if (item.platform != Platform.operatingSystem) {
-            continue;
-          }
-          if (!item.updateChannel.contains(autoUpdateChannel)) {
-            continue;
-          }
-          if (item.version.isEmpty || item.url.isEmpty) {
-            continue;
-          }
-          if (abis.isNotEmpty && item.abis.isNotEmpty) {
-            bool hasAbi = false;
-            for (var abi in abis) {
-              abi = abi.trim();
-              if (abi.isEmpty ||
-                  item.abis.contains("*") ||
-                  item.abis.contains(abi)) {
-                hasAbi = true;
-                break;
-              }
-            }
-            if (!hasAbi) {
-              continue;
-            }
-          }
-
-          if (item.channels.contains("*") || item.channels.contains(channel)) {
-            if (VersionCompareUtils.compareVersion(version, item.version) < 0) {
-              _versionCheck.newVersion = true;
-              _versionCheck.version = item.version;
-              _versionCheck.url = item.url;
-              _versionCheck.sha256 = item.sha256;
-            }
-
-            break;
-          }
+        await save();
+        _checking = false;
+        if (!force) {
+          Future.delayed(_duration, () => _check());
         }
+        return UpdateCheckStatus.failed;
+      }
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(const Duration(seconds: 20));
+      client.close();
+      client = null;
+      _duration = const Duration(hours: 3);
+      final release = jsonDecode(body) as Map<String, dynamic>;
+      final tag = (release["tag_name"] ?? "").toString().trim();
+      final latestVersion = tag.replaceFirst(RegExp(r"^[vV]"), "");
+      final releaseUrl = (release["html_url"] ?? _releasesPageUrl).toString();
+      final currentVersion = AppUtils.getBuildinVersion();
+      _versionCheck.newVersion =
+          latestVersion.isNotEmpty &&
+          VersionCompareUtils.compareVersion(
+                _normalizeVersion(currentVersion),
+                _normalizeVersion(latestVersion),
+              ) <
+              0;
+      _versionCheck.version = _versionCheck.newVersion ? latestVersion : "";
+      _versionCheck.releaseUrl = releaseUrl;
+      _versionCheck.url = _versionCheck.newVersion
+          ? _selectReleaseAsset(release)
+          : "";
+      _versionCheck.sha256 = "";
 
-        Future.delayed(const Duration(milliseconds: 300), () async {
-          for (var callback in onEventCheck) {
+      await save();
+      if (notify) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          for (final callback in onEventCheck) {
             callback();
           }
         });
-        save();
-        await download();
       }
+      await download();
+      _checking = false;
+      if (!force) {
+        Future.delayed(_duration, () => _check());
+      }
+      return _versionCheck.newVersion
+          ? UpdateCheckStatus.available
+          : UpdateCheckStatus.upToDate;
     } catch (err, _) {
+      client?.close(force: true);
       Log.w("AutoUpdateManager._check exception ${err.toString()}");
+      _duration = const Duration(minutes: 10);
+      _checking = false;
+      await save();
+      if (!force) {
+        Future.delayed(_duration, () => _check());
+      }
+      return UpdateCheckStatus.failed;
     }
+  }
 
-    _checking = false;
-    Future.delayed(_duration, () async {
-      _check();
-    });
+  static String _selectReleaseAsset(Map<String, dynamic> release) {
+    final assets = (release["assets"] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    if (Platform.isAndroid) {
+      final apkAssets = assets
+          .where(
+            (asset) =>
+                (asset["name"] ?? "").toString().toLowerCase().endsWith(".apk"),
+          )
+          .toList();
+      if (apkAssets.isEmpty) {
+        return "";
+      }
+      final abis = VPNService.getABIs();
+      for (final abi in abis) {
+        final match = apkAssets.where(
+          (asset) => (asset["name"] ?? "").toString().toLowerCase().contains(
+            abi.toLowerCase(),
+          ),
+        );
+        if (match.isNotEmpty) {
+          return (match.first["browser_download_url"] ?? "").toString();
+        }
+      }
+      final universal = apkAssets.where((asset) {
+        final name = (asset["name"] ?? "").toString().toLowerCase();
+        return name == "app-release.apk" ||
+            name == "app-debug.apk" ||
+            name == "hourglass.apk";
+      });
+      return universal.isEmpty
+          ? ""
+          : (universal.first["browser_download_url"] ?? "").toString();
+    }
+    return "";
+  }
+
+  static String _normalizeVersion(String version) {
+    final value = version.trim().replaceFirst(RegExp(r"^[vV]"), "");
+    final withoutBuild = value.split("+").first;
+    final separator = withoutBuild.indexOf("-");
+    final core = separator < 0
+        ? withoutBuild
+        : withoutBuild.substring(0, separator);
+    final suffix = separator < 0 ? "" : withoutBuild.substring(separator);
+    final parts = core.split(".");
+    while (parts.length < 3) {
+      parts.add("0");
+    }
+    return "${parts.join(".")}$suffix";
   }
 }
+
+enum UpdateCheckStatus { available, upToDate, failed }

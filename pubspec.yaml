@@ -1,7 +1,7 @@
 name: hourglass
 description: A calm, lightweight Android proxy client.
 publish_to: none
-version: 1.0.0+1
+version: 1.27.45+4
 
 environment:
   sdk: ">=3.12.0 <4.0.0"

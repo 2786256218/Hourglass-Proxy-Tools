@@ -20,11 +20,108 @@ import 'package:hourglass/screens/widgets/framework.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class VersionUpdateScreen extends LasyRenderingStatefulWidget {
+  static bool _promptVisible = false;
+
   static RouteSettings routeSettings() {
     return const RouteSettings(name: "VersionUpdateScreen");
   }
 
   const VersionUpdateScreen({super.key});
+
+  static Future<void> showUpdatePrompt(BuildContext context) async {
+    final check = AutoUpdateManager.getVersionCheck();
+    if (!check.newVersion || !context.mounted || _promptVisible) {
+      return;
+    }
+    _promptVisible = true;
+    try {
+      final isChinese = Localizations.localeOf(context).languageCode == 'zh';
+      final action = await showDialog<int>(
+        context: context,
+        barrierDismissible: true,
+        builder: (dialogContext) => Dialog(
+          backgroundColor: Colors.transparent,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(28),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Theme.of(
+                    dialogContext,
+                  ).colorScheme.surface.withValues(alpha: 0.92),
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.75),
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isChinese ? '发现新版本' : 'Update available',
+                      style: Theme.of(dialogContext).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      isChinese
+                          ? 'Hourglass ${check.version} 已发布。你可以现在下载更新，稍后再说，或查看 GitHub Release。'
+                          : 'Hourglass ${check.version} is available. Download it now, dismiss this reminder, or view the GitHub release.',
+                    ),
+                    const SizedBox(height: 24),
+                    Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(dialogContext, 0),
+                          child: Text(isChinese ? '取消' : 'Cancel'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => Navigator.pop(dialogContext, 2),
+                          icon: const Icon(Icons.open_in_new, size: 18),
+                          label: Text(isChinese ? '访问 GitHub' : 'Visit GitHub'),
+                        ),
+                        FilledButton(
+                          onPressed: () => Navigator.pop(dialogContext, 1),
+                          child: Text(isChinese ? '直接更新' : 'Update now'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      if (!context.mounted) {
+        return;
+      }
+      if (action == 1) {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            settings: routeSettings(),
+            builder: (context) => const VersionUpdateScreen(),
+          ),
+        );
+      } else if (action == 2) {
+        final releaseUrl = check.releaseUrl.isEmpty
+            ? 'https://github.com/2786256218/Hourglass-Proxy-Tools/releases'
+            : check.releaseUrl;
+        await launchUrl(
+          Uri.parse(releaseUrl),
+          mode: LaunchMode.externalApplication,
+        );
+      }
+    } finally {
+      _promptVisible = false;
+    }
+  }
 
   @override
   State<VersionUpdateScreen> createState() => _VersionUpdateScreenState();
@@ -82,26 +179,54 @@ class _VersionUpdateScreenState
                       ),
                     ),
                     const SizedBox(height: 30),
-                    SizedBox(
-                      height: 45.0,
-                      child: ElevatedButton(
-                        onPressed: _installing
-                            ? null
-                            : () async {
-                                await checkReplace();
-                              },
-                        child: _installing
-                            ? SizedBox(
-                                width: 26,
-                                height: 26,
-                                child: RepaintBoundary(
-                                  child: CircularProgressIndicator(
-                                    color: ThemeDefine.kColorGreenBright,
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: [
+                        SizedBox(
+                          height: 45,
+                          child: FilledButton(
+                            onPressed: _installing ? null : checkReplace,
+                            child: _installing
+                                ? const SizedBox(
+                                    width: 22,
+                                    height: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : Text(
+                                    Platform.isAndroid
+                                        ? (Localizations.localeOf(
+                                                    context,
+                                                  ).languageCode ==
+                                                  'zh'
+                                              ? '下载并安装'
+                                              : 'Download and install')
+                                        : tcontext.VersionUpdateScreen.update,
                                   ),
-                                ),
-                              )
-                            : Text(tcontext.VersionUpdateScreen.update),
-                      ),
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => launchUrl(
+                            Uri.parse(checkVersion.releaseUrl),
+                            mode: LaunchMode.externalApplication,
+                          ),
+                          icon: const Icon(Icons.open_in_new, size: 18),
+                          label: Text(
+                            Localizations.localeOf(context).languageCode == 'zh'
+                                ? '访问 GitHub'
+                                : 'Visit GitHub',
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _installing
+                              ? null
+                              : () => Navigator.pop(context),
+                          child: Text(tcontext.VersionUpdateScreen.cancel),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -143,20 +268,31 @@ class _VersionUpdateScreenState
   }
 
   Future<void> checkReplace() async {
-    String? installer = await AutoUpdateManager.checkReplace();
-    if (!mounted) {
-      return;
-    }
-    if (installer == null) {
-      Navigator.pop(context);
-      return;
-    }
     if (_installing) {
       return;
     }
     _installing = true;
     setState(() {});
     try {
+      String? installer = await AutoUpdateManager.checkReplace();
+      if (installer == null && Platform.isAndroid) {
+        await AutoUpdateManager.download(force: true);
+        installer = await AutoUpdateManager.checkReplace();
+      }
+      if (!mounted) {
+        return;
+      }
+      if (installer == null) {
+        _installing = false;
+        setState(() {});
+        await DialogUtils.showAlertDialog(
+          context,
+          Localizations.localeOf(context).languageCode == 'zh'
+              ? '无法下载更新包，请检查网络或访问 GitHub Releases 手动下载。'
+              : 'The update package could not be downloaded. Check your network or download it from GitHub Releases.',
+        );
+        return;
+      }
       await VPNService.stop();
       if (Platform.isWindows) {
         await launchUrl(Uri(path: installer, scheme: 'file'));
@@ -221,7 +357,7 @@ class _VersionUpdateScreenState
       setState(() {});
     }
     _installing = false;
-    if (!mounted) {
+    if (mounted) {
       setState(() {});
     }
   }

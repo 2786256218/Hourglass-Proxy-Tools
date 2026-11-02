@@ -416,6 +416,7 @@ class ServerManager {
 
   static final Map<int, void Function(String, bool, bool)>
   _onEventRemoveConfigs = {};
+  static final Map<int, void Function()> _onEventServerListChanged = {};
   static final Map<int, Future<void> Function(String, bool)>
   _onEventEnableConfigs = {};
   static final Map<int, void Function(String)>
@@ -517,6 +518,26 @@ class ServerManager {
     _onEventRemoveConfigs[hashcode] = callback;
   }
 
+  static void onEventServerListChanged(
+    int hashcode,
+    void Function() callback,
+  ) {
+    _onEventServerListChanged[hashcode] = callback;
+  }
+
+  static void notifyServerListChanged() {
+    final callbacks = _onEventServerListChanged.values.toList();
+    for (final callback in callbacks) {
+      try {
+        callback();
+      } catch (err, _) {
+        Log.w(
+          "ServerManager.notifyServerListChanged exception ${err.toString()}",
+        );
+      }
+    }
+  }
+
   static void onEventEnableConfig(
     int hashcode,
     Future<void> Function(String, bool) callback,
@@ -555,6 +576,7 @@ class ServerManager {
     _onEventAddConfigs.remove(hashcode);
     _onEventUpdateConfigs.remove(hashcode);
     _onEventRemoveConfigs.remove(hashcode);
+    _onEventServerListChanged.remove(hashcode);
     _onEventEnableConfigs.remove(hashcode);
     _onEventRemoteTrafficReloadStart.remove(hashcode);
     _onEventRemoteTrafficReloadEnd.remove(hashcode);

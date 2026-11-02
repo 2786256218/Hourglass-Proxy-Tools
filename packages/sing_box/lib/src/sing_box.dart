@@ -1063,6 +1063,7 @@ class SingBox {
   Future<SingBoxPingResult> pingOutbound(
     String tag, {
     Duration timeout = const Duration(seconds: 15),
+    bool testParentGroup = true,
   }) async {
     _ensureInitialized();
     if (!isConnected) {
@@ -1080,8 +1081,11 @@ class SingBox {
                 !item.urlTestTime!.isBefore(startedAt),
           )
           .timeout(timeout);
-      await urlTest(await _urlTestGroupOf(tag) ?? tag);
-      final item = await resultFuture;
+      final groupTag = testParentGroup ? await _urlTestGroupOf(tag) : null;
+      final item = await (() async {
+        await urlTest(groupTag ?? tag);
+        return resultFuture;
+      })().timeout(timeout);
       return item.urlTestDelay == null
           ? SingBoxPingResult.failure(
               'URL test failed',
@@ -1102,6 +1106,8 @@ class SingBox {
       );
     } on SingBoxException catch (e) {
       return SingBoxPingResult.failure(e.message, tag: tag, address: address);
+    } on Object catch (e) {
+      return SingBoxPingResult.failure('$e', tag: tag, address: address);
     }
   }
 
@@ -1125,6 +1131,7 @@ class SingBox {
     Iterable<SingBoxServerConfig> servers, {
     int concurrency = 8,
     Duration timeout = const Duration(seconds: 5),
+    bool testParentGroup = true,
   }) {
     _ensureInitialized();
     if (concurrency < 1) {
@@ -1143,7 +1150,7 @@ class SingBox {
         while (!cancelled && next < queue.length) {
           final server = queue[next++];
           final result = throughTunnel
-              ? await _pingInTunnel(server, tags, timeout)
+              ? await _pingInTunnel(server, tags, timeout, testParentGroup)
               : await _tcpPing(server, timeout);
           if (!cancelled) controller.add(result);
         }
@@ -1204,6 +1211,7 @@ class SingBox {
     SingBoxServerConfig server,
     Map<String, String> tags,
     Duration timeout,
+    bool testParentGroup,
   ) async {
     final tag = tags[_serverKey(server.protocol, server.server, server.port)];
     if (tag == null) {
@@ -1213,7 +1221,11 @@ class SingBox {
         serverId: server.id,
       );
     }
-    final result = await pingOutbound(tag, timeout: timeout);
+    final result = await pingOutbound(
+      tag,
+      timeout: timeout,
+      testParentGroup: testParentGroup,
+    );
     return result.forServer(server.id);
   }
 

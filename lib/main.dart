@@ -16,11 +16,12 @@ import 'subscription_support.dart';
 const _ink = Color(0xFF14223A);
 const _blue = Color(0xFF4E8DF5);
 const _mint = Color(0xFF4BCDB0);
-const _appVersion = '1.0.0';
+const _appVersion = '1.27.45';
 const _repositoryUrl = 'https://github.com/2786256218/Hourglass-Proxy-Tools';
 const _routingPrefsKey = 'hourglass.userRoutingRules.v1';
 const _subscriptionGroupsPrefsKey = 'hourglass.subscriptionGroups.v1';
 const _subscriptionNamesPrefsKey = 'hourglass.subscriptionNames.v1';
+const _subscriptionSyncTimesPrefsKey = 'hourglass.subscriptionSyncTimes.v1';
 const _overridePrefsKey = 'hourglass.configOverrides.v1';
 const _geoRoutingPrefsKey = 'hourglass.subscriptionGeodata.v1';
 const _probeResultsPrefsKey = 'hourglass.probeResults.v1';
@@ -300,6 +301,38 @@ Future<({int updated, int failed})> _updateRuleSetModules(
   return (updated: updated, failed: failed);
 }
 
+Future<({int updated, int failed})> _downloadSubscriptionRuleModules(
+  SingBox engine,
+  List<Map<String, String>> geodataRules,
+) async {
+  final workDir = engine.runtimeInfo?.workingDirectory;
+  if (workDir == null || workDir.isEmpty) {
+    return (updated: 0, failed: geodataRules.length);
+  }
+  final urls = <String, String>{};
+  for (final rule in geodataRules) {
+    final type = rule['type']?.toUpperCase();
+    final value = rule['value']?.trim().toLowerCase();
+    if (value == null || value.isEmpty) continue;
+    final template = switch (type) {
+      'GEOIP' => engine.configOptions.geoipRuleSetUrl,
+      'GEOSITE' => engine.configOptions.geositeRuleSetUrl,
+      _ => null,
+    };
+    if (template == null || !template.contains('{tag}')) continue;
+    final moduleTag = '${type == 'GEOSITE' ? 'geosite' : 'geoip'}-$value';
+    final configTag = 'hourglass-$moduleTag'.replaceAll(
+      RegExp(r'[^A-Za-z0-9_.-]'),
+      '_',
+    );
+    urls[configTag] = template.replaceAll('{tag}', moduleTag);
+  }
+  if (urls.isEmpty) return (updated: 0, failed: 0);
+  // Provider-specific geosite/geoip references are materialized at import
+  // time, while their subscription endpoints are still known and reachable.
+  return _updateRuleSetModules(urls, workDir, force: true);
+}
+
 Future<String?> _readProtectedString(String key) async {
   final preferences = await SharedPreferences.getInstance();
   if (Platform.isAndroid) {
@@ -575,6 +608,60 @@ Future<void> _saveSubscriptionName(String id, String name) async {
   await _writeProtectedString(_subscriptionNamesPrefsKey, jsonEncode(names));
 }
 
+Future<Map<String, DateTime>> _readSubscriptionSyncTimes() async {
+  final raw = await _readProtectedString(_subscriptionSyncTimesPrefsKey);
+  if (raw == null) return {};
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is Map) {
+      final syncTimes = <String, DateTime>{};
+      for (final entry in decoded.entries) {
+        final time = DateTime.tryParse('${entry.value}');
+        if (time != null) syncTimes['${entry.key}'] = time.toLocal();
+      }
+      return syncTimes;
+    }
+  } on Object {
+    // Ignore invalid optional synchronization metadata.
+  }
+  return {};
+}
+
+Future<void> _saveSubscriptionSyncTime(String id) async {
+  final syncTimes = await _readSubscriptionSyncTimes();
+  syncTimes[id] = DateTime.now();
+  await _writeProtectedString(
+    _subscriptionSyncTimesPrefsKey,
+    jsonEncode({
+      for (final entry in syncTimes.entries)
+        entry.key: entry.value.toUtc().toIso8601String(),
+    }),
+  );
+}
+
+Future<void> _removeSubscriptionSyncTime(String id) async {
+  final syncTimes = await _readSubscriptionSyncTimes();
+  syncTimes.remove(id);
+  await _writeProtectedString(
+    _subscriptionSyncTimesPrefsKey,
+    jsonEncode({
+      for (final entry in syncTimes.entries)
+        entry.key: entry.value.toUtc().toIso8601String(),
+    }),
+  );
+}
+
+String _formatSubscriptionSyncTime(DateTime? syncedAt) {
+  if (syncedAt == null) return '未记录';
+  final age = DateTime.now().difference(syncedAt);
+  if (age < const Duration(hours: 1)) return '刚刚';
+  if (age < const Duration(days: 2)) return '一天前';
+  if (age < const Duration(days: 7)) return '最近';
+  if (age < const Duration(days: 21)) return '半个月前';
+  if (age < const Duration(days: 45)) return '一个月前';
+  return '早期';
+}
+
 class _HourglassOverrides {
   const _HourglassOverrides({
     this.allowLan = false,
@@ -716,6 +803,8 @@ Future<_SubscriptionInstallResult> _installSubscription(
   if (parsedLinks.isEmpty && clash == null) {
     throw const FormatException('订阅格式不受支持，或内容中没有可用节点');
   }
+  var downloadedRuleModules = 0;
+  final ruleModuleWarnings = <String>[];
   if (clash == null) await _removeSubscriptionGeodata(subscriptionId);
   final existing = await engine.getServerConfigs();
   final oldGroup = existing
@@ -755,6 +844,16 @@ Future<_SubscriptionInstallResult> _installSubscription(
       storedGeoRules.remove(subscriptionId);
     } else {
       storedGeoRules[subscriptionId] = clash.geodataRules;
+      final moduleResult = await _downloadSubscriptionRuleModules(
+        engine,
+        clash.geodataRules,
+      );
+      downloadedRuleModules = moduleResult.updated;
+      if (moduleResult.failed > 0) {
+        ruleModuleWarnings.add(
+          '${moduleResult.failed} 个订阅规则模块未能在导入时下载；已保留现有本地文件，连接仍可继续。',
+        );
+      }
     }
     await _writeProtectedString(
       _geoRoutingPrefsKey,
@@ -817,6 +916,7 @@ Future<_SubscriptionInstallResult> _installSubscription(
     _subscriptionGroupsPrefsKey,
     jsonEncode(savedGroups),
   );
+  await _saveSubscriptionSyncTime(subscriptionId);
   if (active == null || oldGroup.any((server) => server.id == active.id)) {
     final replacement =
         imported
@@ -831,8 +931,8 @@ Future<_SubscriptionInstallResult> _installSubscription(
   }
   return _SubscriptionInstallResult(
     imported,
-    clash?.downloadedProviders ?? 0,
-    clash?.warnings ?? const [],
+    (clash?.downloadedProviders ?? 0) + downloadedRuleModules,
+    [...?clash?.warnings, ...ruleModuleWarnings],
   );
 }
 
@@ -842,6 +942,310 @@ String _stableId(String value) {
     hash = ((hash ^ codeUnit) * 0x01000193) & 0xffffffff;
   }
   return hash.toRadixString(16);
+}
+
+const _githubLatestReleaseApi =
+    'https://api.github.com/repos/2786256218/Hourglass-Proxy-Tools/releases/latest';
+const _githubReleasesUrl =
+    'https://github.com/2786256218/Hourglass-Proxy-Tools/releases';
+bool _updatePromptVisible = false;
+bool _startupUpdateCheckStarted = false;
+Future<_GithubRelease?>? _pendingReleaseCheck;
+
+class _GithubRelease {
+  const _GithubRelease({
+    required this.version,
+    required this.releaseUrl,
+    required this.apkUrl,
+    required this.apkAssetName,
+  });
+
+  final String version;
+  final String releaseUrl;
+  final String? apkUrl;
+  final String? apkAssetName;
+}
+
+Future<_GithubRelease?> _fetchLatestRelease() {
+  final pending = _pendingReleaseCheck;
+  if (pending != null) return pending;
+  final check = _requestLatestRelease();
+  _pendingReleaseCheck = check;
+  return check.whenComplete(() => _pendingReleaseCheck = null);
+}
+
+Future<_GithubRelease?> _requestLatestRelease() async {
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+  try {
+    final request = await client
+        .getUrl(Uri.parse(_githubLatestReleaseApi))
+        .timeout(const Duration(seconds: 15));
+    request.headers
+      ..set(HttpHeaders.acceptHeader, 'application/vnd.github+json')
+      ..set(HttpHeaders.userAgentHeader, 'Hourglass-Android/$_appVersion');
+    final response = await request.close().timeout(const Duration(seconds: 15));
+    if (response.statusCode != HttpStatus.ok) {
+      throw HttpException('GitHub 返回状态码 ${response.statusCode}');
+    }
+    final body = await response
+        .transform(utf8.decoder)
+        .join()
+        .timeout(const Duration(seconds: 15));
+    final decoded = jsonDecode(body);
+    if (decoded is! Map) throw const FormatException('Release 响应格式无效');
+    final tag = (decoded['tag_name'] ?? '').toString().trim();
+    final releaseCandidate = Uri.tryParse(
+      (decoded['html_url'] ?? _githubReleasesUrl).toString(),
+    );
+    final releaseUrl =
+        releaseCandidate != null &&
+            releaseCandidate.scheme == 'https' &&
+            releaseCandidate.host == 'github.com'
+        ? releaseCandidate.toString()
+        : _githubReleasesUrl;
+    if (tag.isEmpty) throw const FormatException('Release 未提供版本号');
+    final assets = decoded['assets'];
+    final installedAbi = Platform.isAndroid
+        ? await _externalLinkChannel.invokeMethod<String>('getInstalledAbi')
+        : null;
+    final expectedApkName = switch (installedAbi) {
+      'arm64-v8a' => 'app-arm64-v8a-release.apk',
+      'armeabi-v7a' => 'app-armeabi-v7a-release.apk',
+      'x86_64' => 'app-x86_64-release.apk',
+      _ => null,
+    };
+    String? apkUrl;
+    String? apkAssetName;
+    if (assets is List) {
+      for (final asset in assets.whereType<Map>()) {
+        final name = (asset['name'] ?? '').toString().toLowerCase();
+        if (expectedApkName != null && name == expectedApkName) {
+          apkUrl = asset['browser_download_url']?.toString();
+          apkAssetName = name;
+          break;
+        }
+      }
+    }
+    return _GithubRelease(
+      version: tag.replaceFirst(RegExp(r'^[vV]'), ''),
+      releaseUrl: releaseUrl,
+      apkUrl: apkUrl,
+      apkAssetName: apkAssetName,
+    );
+  } finally {
+    client.close(force: true);
+  }
+}
+
+bool _isNewerVersion(String candidate, String current) {
+  List<int> parts(String version) => version
+      .split(RegExp(r'[-+]'))
+      .first
+      .split('.')
+      .map((part) => int.tryParse(part) ?? 0)
+      .toList();
+  final newer = parts(candidate);
+  final installed = parts(current);
+  for (var index = 0; index < max(newer.length, installed.length); index++) {
+    final left = index < newer.length ? newer[index] : 0;
+    final right = index < installed.length ? installed[index] : 0;
+    if (left != right) return left > right;
+  }
+  return false;
+}
+
+Future<File> _downloadReleaseApk(_GithubRelease release) async {
+  final url = release.apkUrl;
+  final uri = url == null ? null : Uri.tryParse(url);
+  if (uri == null || uri.scheme != 'https' || uri.host != 'github.com') {
+    throw const FormatException('此 Release 没有当前设备架构对应的 APK');
+  }
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 15);
+  try {
+    final request = await client
+        .getUrl(uri)
+        .timeout(const Duration(seconds: 20));
+    request.headers.set(HttpHeaders.userAgentHeader, 'Hourglass-Android');
+    final response = await request.close().timeout(const Duration(seconds: 30));
+    if (response.statusCode != HttpStatus.ok) {
+      throw HttpException('APK 下载失败，状态码 ${response.statusCode}');
+    }
+    final safeVersion = release.version.replaceAll(
+      RegExp(r'[^A-Za-z0-9._-]'),
+      '_',
+    );
+    final file = File(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}hourglass-update-$safeVersion.apk',
+    );
+    final sink = file.openWrite();
+    var size = 0;
+    try {
+      await for (final chunk in response.timeout(const Duration(seconds: 45))) {
+        size += chunk.length;
+        if (size > 500 * 1024 * 1024) {
+          throw const FormatException('更新包超过 500 MB');
+        }
+        sink.add(chunk);
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    if (size == 0) throw const FormatException('下载到的 APK 为空');
+    return file;
+  } finally {
+    client.close(force: true);
+  }
+}
+
+String _friendlyUpdateError(Object error) => error
+    .toString()
+    .replaceFirst('Exception: ', '')
+    .replaceFirst('HttpException: ', '');
+
+Future<void> _downloadAndInstallRelease(
+  BuildContext context,
+  _GithubRelease release,
+) async {
+  if (!Platform.isAndroid) {
+    _showGlassNotice(context, '直接安装目前仅支持 Android');
+    return;
+  }
+  var progressShown = false;
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) => Dialog(
+      backgroundColor: Colors.transparent,
+      child: _Glass(
+        padding: const EdgeInsets.all(24),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator.adaptive(strokeWidth: 2.5),
+            ),
+            const SizedBox(width: 16),
+            Expanded(child: Text('正在下载 Hourglass ${release.version}…')),
+          ],
+        ),
+      ),
+    ),
+  );
+  progressShown = true;
+  try {
+    final apk = await _downloadReleaseApk(release);
+    if (!context.mounted) return;
+    if (progressShown) Navigator.of(context, rootNavigator: true).pop();
+    progressShown = false;
+    await _externalLinkChannel.invokeMethod<bool>('installApk', {
+      'path': apk.path,
+    });
+  } on Object catch (error) {
+    if (!context.mounted) return;
+    if (progressShown) Navigator.of(context, rootNavigator: true).pop();
+    _showGlassNotice(context, '更新失败：${_friendlyUpdateError(error)}');
+  }
+}
+
+Future<void> _showReleaseUpdateDialog(
+  BuildContext context,
+  _GithubRelease release,
+) async {
+  if (!context.mounted || _updatePromptVisible) return;
+  _updatePromptVisible = true;
+  try {
+    final action = await showDialog<int>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: _Glass(
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '发现新版本',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 9),
+              Text(
+                'Hourglass ${release.version} 已发布。将下载本机对应的 ${release.apkAssetName ?? 'APK'}，不会误选其他架构版本。',
+                style: const TextStyle(color: Color(0xFF64758C), height: 1.5),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.pop(dialogContext, 0),
+                      child: const Text('取消'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => Navigator.pop(dialogContext, 2),
+                      icon: const Icon(Icons.open_in_new_rounded, size: 16),
+                      label: const Text('访问 GitHub'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: release.apkUrl == null
+                      ? null
+                      : () => Navigator.pop(dialogContext, 1),
+                  icon: const Icon(Icons.download_rounded, size: 18),
+                  label: const Text('立即下载并安装'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!context.mounted) return;
+    if (action == 1) {
+      await _downloadAndInstallRelease(context, release);
+    } else if (action == 2) {
+      await _externalLinkChannel.invokeMethod<bool>('openUrl', {
+        'url': release.releaseUrl,
+      });
+    }
+  } finally {
+    _updatePromptVisible = false;
+  }
+}
+
+Future<void> _checkForAppUpdate(
+  BuildContext context, {
+  required bool showUpToDate,
+}) async {
+  try {
+    final release = await _fetchLatestRelease();
+    if (!context.mounted || release == null) return;
+    if (release.apkUrl != null &&
+        _isNewerVersion(release.version, _appVersion)) {
+      await _showReleaseUpdateDialog(context, release);
+    } else if (showUpToDate) {
+      _showGlassNotice(context, '当前已是最新版本');
+    }
+  } on Object catch (error) {
+    if (showUpToDate && context.mounted) {
+      _showGlassNotice(context, '检查更新失败：${_friendlyUpdateError(error)}');
+    }
+  }
 }
 
 Future<void> main() async {
@@ -903,12 +1307,17 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   _HourglassOverrides _overrides = const _HourglassOverrides();
   _ResidentialProxySettings _residential = const _ResidentialProxySettings();
   final Map<String, SingBoxPingResult> _probeResults = {};
+  SingBoxPingResult? _liveGraphLatency;
   Map<String, String> _subscriptionNames = {};
+  Map<String, DateTime> _subscriptionSyncTimes = {};
   final Set<String> _testingIds = {};
 
   final List<double> _downloadHistory = [];
   final List<double> _uploadHistory = [];
   final List<double> _latencyHistory = [];
+  String? _graphLatencyServerId;
+  DateTime? _lastGraphLatencySampleAt;
+  bool _graphLatencySampling = false;
   bool _testingAvailability = false;
   bool _testingAll = false;
   bool _autoSelectEnabled = false;
@@ -917,6 +1326,9 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   Timer? _autoSelectTimer;
   DateTime? _lastAutoSelectionAt;
   DateTime? _lastStatsUiAt;
+  DateTime? _lastTrafficTotalsSampleAt;
+  int? _lastDownloadTotal;
+  int? _lastUploadTotal;
   int _tabIndex = 0;
   StreamSubscription<SingBoxConnectionState>? _stateSub;
   StreamSubscription<SingBoxConnectionStats>? _statsSub;
@@ -932,11 +1344,18 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       value: 1,
     );
     _initialize();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_startupUpdateCheckStarted) {
+        _startupUpdateCheckStarted = true;
+        unawaited(_checkForAppUpdate(context, showUpToDate: false));
+      }
+    });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _syncStatsSubscription();
       final last = _lastAutoSelectionAt;
       _syncAutoSelectTimer(
         runNow:
@@ -945,6 +1364,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
                 DateTime.now().difference(last) >= const Duration(minutes: 15)),
       );
     } else {
+      _syncStatsSubscription();
       _autoSelectTimer?.cancel();
       _autoSelectTimer = null;
     }
@@ -955,11 +1375,13 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     _tabAnimationController.value = 1;
     _tabEntryDirection = 0;
     setState(() => _tabIndex = index);
+    _syncStatsSubscription();
   }
 
   void _changeTabBySwipe(int index, double direction) {
     _tabEntryDirection = direction;
     setState(() => _tabIndex = index);
+    _syncStatsSubscription();
     _tabAnimationController.forward(from: 0);
   }
 
@@ -967,6 +1389,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     try {
       _probeResults.addAll(await _readProbeResults());
       _subscriptionNames = await _readSubscriptionNames();
+      _subscriptionSyncTimes = await _readSubscriptionSyncTimes();
       _overrides = await _loadOverrides();
       _residential = await _loadResidentialProxySettings();
       _autoSelectEnabled =
@@ -991,31 +1414,25 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       _stateSub = _engine.watchConnectionState().listen((state) {
         final wasConnected =
             _connection.status == SingBoxConnectionStatus.connected;
-        if (mounted) setState(() => _connection = state);
+        if (mounted) {
+          setState(() {
+            _connection = state;
+            if (state.status == SingBoxConnectionStatus.disconnected) {
+              _latencyHistory.clear();
+              _liveGraphLatency = null;
+              _lastGraphLatencySampleAt = null;
+              _graphLatencyServerId = null;
+            }
+          });
+        }
+        _syncStatsSubscription();
         if (!wasConnected &&
             state.status == SingBoxConnectionStatus.connected &&
             _autoSelectEnabled) {
           unawaited(_runAutoSelectionProbe());
         }
       });
-      _statsSub = _engine.watchConnectionStats().listen((stats) {
-        _stats = stats;
-        // Keep counters current without rebuilding the app while the graph is
-        // off-screen; the latest values are shown immediately on return.
-        if (_tabIndex != 0) return;
-        final now = DateTime.now();
-        if (_lastStatsUiAt != null &&
-            now.difference(_lastStatsUiAt!) < const Duration(seconds: 1)) {
-          return;
-        }
-        _lastStatsUiAt = now;
-        if (mounted) {
-          setState(() {
-            _appendSample(_downloadHistory, stats.downloadSpeed.toDouble());
-            _appendSample(_uploadHistory, stats.uploadSpeed.toDouble());
-          });
-        }
-      });
+      _syncStatsSubscription();
       _groupsSub = _engine.watchGroups().listen((groups) {
         final selectedTag = groups
             .where((group) => group.selectable)
@@ -1057,11 +1474,114 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     }
   }
 
+  /// The native status stream polls the VPN core once per second. Keep it
+  /// attached only while the connected home dashboard is visible.
+  void _syncStatsSubscription() {
+    final shouldListen =
+        mounted &&
+        _tabIndex == 0 &&
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
+        _connection.status == SingBoxConnectionStatus.connected;
+    if (!shouldListen) {
+      _statsSub?.cancel();
+      _statsSub = null;
+      return;
+    }
+    if (_statsSub != null) return;
+    _statsSub = _engine.watchConnectionStats().listen(_onConnectionStats);
+  }
+
+  Future<void> _restartStatsSubscription() async {
+    final subscription = _statsSub;
+    _statsSub = null;
+    await subscription?.cancel();
+    _lastStatsUiAt = null;
+    _lastTrafficTotalsSampleAt = null;
+    _lastDownloadTotal = null;
+    _lastUploadTotal = null;
+    _syncStatsSubscription();
+  }
+
+  void _onConnectionStats(SingBoxConnectionStats stats) {
+    // URL availability probes can temporarily reset the core's reported
+    // instantaneous rates. Keep the last dashboard sample during the probe;
+    // the status channel is restarted after it completes.
+    if (_testingAvailability) return;
+    final now = DateTime.now();
+    // Follow the native half-second status cadence for responsive traffic data.
+    if (_lastStatsUiAt != null &&
+        now.difference(_lastStatsUiAt!) < const Duration(milliseconds: 400)) {
+      return;
+    }
+    _lastStatsUiAt = now;
+    final previousAt = _lastTrafficTotalsSampleAt;
+    final previousDownload = _lastDownloadTotal;
+    final previousUpload = _lastUploadTotal;
+    final elapsed = previousAt == null
+        ? null
+        : now.difference(previousAt).inMilliseconds / 1000;
+    final hasUsableDelta =
+        elapsed != null &&
+        elapsed >= .35 &&
+        elapsed <= 3 &&
+        previousDownload != null &&
+        previousUpload != null &&
+        stats.downloadTotal >= previousDownload &&
+        stats.uploadTotal >= previousUpload;
+    final measuredStats = hasUsableDelta
+        ? stats.copyWith(
+            downloadSpeed:
+                ((stats.downloadTotal - previousDownload!) / elapsed!).round(),
+            uploadSpeed: ((stats.uploadTotal - previousUpload!) / elapsed!)
+                .round(),
+          )
+        : stats;
+    _stats = measuredStats;
+    _lastTrafficTotalsSampleAt = now;
+    _lastDownloadTotal = stats.downloadTotal;
+    _lastUploadTotal = stats.uploadTotal;
+    final active = _servers
+        .where((server) => server.id == _activeId)
+        .firstOrNull;
+    if (_graphLatencyServerId != active?.id) {
+      _graphLatencyServerId = active?.id;
+      _lastGraphLatencySampleAt = null;
+      _latencyHistory.clear();
+      _liveGraphLatency = null;
+    }
+    final homeRouteVisible =
+        mounted && (ModalRoute.of(context)?.isCurrent ?? true);
+    final shouldSampleLatency =
+        active != null &&
+        (_lastGraphLatencySampleAt == null ||
+            now.difference(_lastGraphLatencySampleAt!) >=
+                const Duration(minutes: 1));
+    if (shouldSampleLatency &&
+        _connection.status == SingBoxConnectionStatus.connected &&
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
+        homeRouteVisible &&
+        !_graphLatencySampling &&
+        !_testingAvailability &&
+        _testingIds.isEmpty &&
+        !_busy &&
+        !_autoSelecting) {
+      _lastGraphLatencySampleAt = now;
+      unawaited(_sampleGraphLatency(active));
+    }
+    if (mounted) {
+      setState(() {
+        _appendSample(_downloadHistory, measuredStats.downloadSpeed.toDouble());
+        _appendSample(_uploadHistory, measuredStats.uploadSpeed.toDouble());
+      });
+    }
+  }
+
   Future<void> _reloadServers() async {
     final servers = await _engine.getServerConfigs();
     final active = await _engine.getActiveServerConfig();
     final savedProbeResults = await _readProbeResults();
     final subscriptionNames = await _readSubscriptionNames();
+    final subscriptionSyncTimes = await _readSubscriptionSyncTimes();
     for (final server in servers.where(_isLoopbackProfile)) {
       savedProbeResults[server.id] = SingBoxPingResult.failure(
         '无效节点：服务器地址是本机回环地址',
@@ -1076,8 +1596,42 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       _servers = servers;
       _activeId = active?.id;
       _subscriptionNames = subscriptionNames;
+      _subscriptionSyncTimes = subscriptionSyncTimes;
       _probeResults.addAll(savedProbeResults);
     });
+  }
+
+  Future<void> _sampleGraphLatency(SingBoxServerConfig server) async {
+    if (_graphLatencySampling) return;
+    _graphLatencySampling = true;
+    try {
+      if (_activeId != server.id ||
+          _connection.status != SingBoxConnectionStatus.connected) {
+        return;
+      }
+      final result = _rejectSuspiciousNodeLatency(
+        await _directTcpPing(server, const Duration(seconds: 5)),
+      );
+      if (!mounted ||
+          _activeId != server.id ||
+          _connection.status != SingBoxConnectionStatus.connected) {
+        return;
+      }
+      setState(() {
+        _liveGraphLatency = result;
+        if (result.success) {
+          _appendSample(_latencyHistory, result.ping.toDouble());
+        }
+      });
+    } on Object {
+      if (mounted) {
+        setState(() {
+          _liveGraphLatency = null;
+        });
+      }
+    } finally {
+      _graphLatencySampling = false;
+    }
   }
 
   Future<SubscriptionHttpResponse> _downloadSubscriptionWithFallback(
@@ -1200,12 +1754,6 @@ class _ProxyHomePageState extends State<ProxyHomePage>
           ),
         );
       }
-      final activeResult = _activeId == null ? null : _probeResults[_activeId];
-      if (activeResult?.success == true && mounted) {
-        setState(
-          () => _appendSample(_latencyHistory, activeResult!.ping.toDouble()),
-        );
-      }
       await _persistProbeResults(_probeResults);
       final alive = targets
           .where((server) => _probeResults[server.id]?.success == true)
@@ -1266,6 +1814,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     if (!_autoSelectEnabled ||
         _autoSelecting ||
         _busy ||
+        _testingAvailability ||
         _testingAll ||
         _testingIds.isNotEmpty ||
         _connection.status != SingBoxConnectionStatus.connected ||
@@ -1329,7 +1878,6 @@ class _ProxyHomePageState extends State<ProxyHomePage>
             tag: candidate.tag,
             serverId: server.id,
           );
-          _appendSample(_latencyHistory, candidate.urlTestDelay!.toDouble());
         });
         await _persistProbeResults(_probeResults);
         return;
@@ -1373,39 +1921,74 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     setState(() => _testingAvailability = true);
     _notice('正在经当前代理访问 Google 测试地址…');
     try {
-      final rawResult = residentialActive
-          ? await _engine.pingOutbound(
-              'hourglass-residential-ip',
-              timeout: const Duration(seconds: 12),
-            )
-          : await _engine
+      SingBoxPingResult? result;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        try {
+          if (residentialActive) {
+            final startedAt = DateTime.now().subtract(
+              const Duration(seconds: 1),
+            );
+            final group = await _engine.testGroup(
+              'hourglass-check-google',
+              timeout: const Duration(seconds: 20),
+            );
+            final item = group?.items
+                .where(
+                  (candidate) => candidate.tag == 'hourglass-residential-ip',
+                )
+                .firstOrNull;
+            final fresh =
+                item?.urlTestTime != null &&
+                !item!.urlTestTime!.isBefore(startedAt);
+            result = fresh && item?.urlTestDelay != null
+                ? SingBoxPingResult(
+                    ping: item!.urlTestDelay!,
+                    success: true,
+                    tag: item.tag,
+                    serverId: _residentialProbeResultId,
+                  )
+                : SingBoxPingResult.failure(
+                    'Google 测试地址暂时无响应',
+                    tag: item?.tag ?? 'hourglass-residential-ip',
+                    serverId: _residentialProbeResultId,
+                  );
+          } else {
+            result = await _engine
                 .pingServers(
                   [active!],
                   concurrency: 1,
-                  timeout: const Duration(seconds: 12),
+                  timeout: const Duration(seconds: 18),
+                  testParentGroup: false,
                 )
                 .first;
-      final result = _rejectSuspiciousNodeLatency(
-        rawResult.forServer(
-          residentialActive ? _residentialProbeResultId : active!.id,
-        ),
-      );
+            result = result.forServer(active.id);
+          }
+        } on Object catch (error) {
+          result = SingBoxPingResult.failure(
+            _friendlyError(error),
+            tag: active?.name ?? 'hourglass-residential-ip',
+            serverId: active?.id ?? _residentialProbeResultId,
+          );
+        }
+        if (result.success || attempt == 1) break;
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+      }
+      final availabilityResult = _rejectSuspiciousNodeLatency(result!);
       if (!mounted) return;
       setState(() {
-        _probeResults[result.serverId!] = result;
-        if (result.success)
-          _appendSample(_latencyHistory, result.ping.toDouble());
+        _probeResults[availabilityResult.serverId!] = availabilityResult;
       });
       await _persistProbeResults(_probeResults);
       _notice(
-        result.success
-            ? '网站可用性测试成功：${result.ping} ms'
-            : '网站可用性测试失败：${result.errorMessage ?? '目标无法访问'}',
+        availabilityResult.success
+            ? '网站可用性测试成功：${availabilityResult.ping} ms'
+            : '网站可用性测试失败：${availabilityResult.errorMessage ?? '目标无法访问'}',
       );
     } on Object catch (error) {
       if (mounted) _notice(_friendlyError(error));
     } finally {
       if (mounted) setState(() => _testingAvailability = false);
+      await _restartStatsSubscription();
     }
   }
 
@@ -1970,7 +2553,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   }
 
   Future<void> _showSubscriptions() async {
-    final changed = await Navigator.of(context).push<bool>(
+    await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => _SubscriptionManagerPage(
           engine: _engine,
@@ -1979,7 +2562,9 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         ),
       ),
     );
-    if (changed == true) await _reloadServers();
+    // The system back gesture returns null, so always reload the lightweight
+    // subscription metadata when the management route closes.
+    await _reloadServers();
   }
 
   Future<void> _showResidentialSettings() async {
@@ -2034,7 +2619,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   }
 
   Future<void> _openSubscriptionNodes(String subscriptionId) async {
-    final changed = await Navigator.of(context).push<bool>(
+    await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
         builder: (_) => _SubscriptionNodesPage(
           engine: _engine,
@@ -2048,7 +2633,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         ),
       ),
     );
-    if (changed == true) await _reloadServers();
+    await _reloadServers();
   }
 
   Future<void> _removeServer(SingBoxServerConfig server) async {
@@ -2205,11 +2790,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
                                   transitioning:
                                       status.isTransitioning || _busy,
                                   stats: _stats,
-                                  latency: _residential.enabled
-                                      ? _probeResults[_residentialProbeResultId]
-                                      : selected == null
-                                      ? null
-                                      : _probeResults[selected.id],
+                                  latency: _liveGraphLatency,
                                   downloadHistory: _downloadHistory,
                                   uploadHistory: _uploadHistory,
                                   latencyHistory: _latencyHistory,
@@ -2449,6 +3030,8 @@ class _ProxyHomePageState extends State<ProxyHomePage>
                                               _subscriptionNames[url] ??
                                               _subscriptionFallbackName(url),
                                           count: servers.length,
+                                          lastSyncTime:
+                                              _subscriptionSyncTimes[url],
                                           active: active,
                                           onTap: () =>
                                               _openSubscriptionNodes(url),
@@ -2689,7 +3272,7 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
   }
 
   Future<void> _testAllSites() async {
-    if (_testingAll) return;
+    if (_testingAll || _testingSites.isNotEmpty) return;
     if (!_value.enabled || !widget.engine.isConnected) {
       setState(() {
         for (final site in _residentialSiteTargets) {
@@ -2703,67 +3286,77 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
     }
     setState(() => _testingAll = true);
     try {
-      await Future.wait(_residentialSiteTargets.map(_testSite));
+      for (final site in _residentialSiteTargets) {
+        await _testSite(site, fromBatch: true);
+      }
     } finally {
       if (mounted) setState(() => _testingAll = false);
     }
   }
 
-  Future<void> _testSite(_ResidentialSiteTarget site) async {
-    if (!_value.enabled || !widget.engine.isConnected) return;
-    final startedAt = DateTime.now().subtract(const Duration(seconds: 1));
+  Future<void> _testSite(
+    _ResidentialSiteTarget site, {
+    bool fromBatch = false,
+  }) async {
+    if (!_value.enabled ||
+        !widget.engine.isConnected ||
+        _testingSites.contains(site.id) ||
+        (_testingSites.isNotEmpty && !fromBatch) ||
+        (_testingAll && !fromBatch)) {
+      return;
+    }
     setState(() {
       _testingSites.add(site.id);
       _siteResults.remove(site.id);
     });
+    _ResidentialSiteResult? successResult;
+    var lastError = '测试地址暂时没有返回有效结果';
+    var timedOut = true;
     try {
-      final group = await widget.engine.testGroup(
-        site.groupTag,
-        timeout: const Duration(seconds: 15),
-      );
-      final item = group?.items
-          .where((candidate) => candidate.tag == 'hourglass-residential-ip')
-          .firstOrNull;
-      if (!mounted) return;
-      final testTime = item?.urlTestTime;
-      final delay = item?.urlTestDelay;
-      final isFresh = testTime != null && !testTime.isBefore(startedAt);
-      setState(() {
-        _siteResults[site.id] = !isFresh
-            ? const _ResidentialSiteResult(
-                success: false,
-                timedOut: true,
-                detail: '住宅代理访问目标超时',
-              )
-            : delay == null
-            ? const _ResidentialSiteResult(
-                success: false,
-                timedOut: true,
-                detail: '住宅代理连接超时或目标无响应',
-              )
-            : _ResidentialSiteResult(
-                success: true,
-                delayMs: delay,
-                detail: '经住宅 IP 测试成功',
-              );
-      });
-    } on TimeoutException {
-      if (mounted) {
-        setState(() {
-          _siteResults[site.id] = const _ResidentialSiteResult(
-            success: false,
-            timedOut: true,
-            detail: '连接超时',
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final startedAt = DateTime.now().subtract(const Duration(seconds: 1));
+        try {
+          final group = await widget.engine.testGroup(
+            site.groupTag,
+            timeout: const Duration(seconds: 22),
           );
-        });
+          final item = group?.items
+              .where((candidate) => candidate.tag == 'hourglass-residential-ip')
+              .firstOrNull;
+          final fresh =
+              item?.urlTestTime != null &&
+              !item!.urlTestTime!.isBefore(startedAt);
+          final delay = item?.urlTestDelay;
+          if (fresh && delay != null) {
+            successResult = _ResidentialSiteResult(
+              success: true,
+              delayMs: delay,
+              detail: '经住宅 IP 测试成功',
+            );
+            break;
+          }
+          lastError = item == null ? '没有收到住宅代理的测速结果' : '测试目标未返回有效结果';
+          timedOut = true;
+        } on TimeoutException {
+          lastError = '连接超时';
+          timedOut = true;
+        } on Object catch (error) {
+          lastError = error.toString().replaceFirst('Exception: ', '');
+          timedOut = false;
+        }
+        if (attempt == 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 800));
+        }
       }
-    } on Object catch (error) {
       if (mounted) {
         setState(() {
-          _siteResults[site.id] = _ResidentialSiteResult(
-            success: false,
-            detail: error.toString(),
-          );
+          _siteResults[site.id] =
+              successResult ??
+              _ResidentialSiteResult(
+                success: false,
+                timedOut: timedOut,
+                detail: '重试后仍失败：$lastError',
+              );
         });
       }
     } finally {
@@ -3356,6 +3949,7 @@ class _SubscriptionFolderTile extends StatelessWidget {
     required this.url,
     required this.name,
     required this.count,
+    required this.lastSyncTime,
     required this.active,
     required this.onTap,
     this.testing = false,
@@ -3364,6 +3958,7 @@ class _SubscriptionFolderTile extends StatelessWidget {
   final String url;
   final String name;
   final int count;
+  final DateTime? lastSyncTime;
   final bool active;
   final VoidCallback onTap;
   final bool testing;
@@ -3414,7 +4009,7 @@ class _SubscriptionFolderTile extends StatelessWidget {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '${isLocal ? '本地配置' : Uri.tryParse(url)?.host ?? '在线订阅'} · $count 个节点 · 点击查看',
+                      '${isLocal ? '本地配置' : Uri.tryParse(url)?.host ?? '在线订阅'} · $count 个节点 · 同步${_formatSubscriptionSyncTime(lastSyncTime)} · 点击查看',
                       style: const TextStyle(
                         fontSize: 11,
                         color: Color(0xFF7F8EA4),
@@ -3467,6 +4062,8 @@ class _SubscriptionNodesPage extends StatefulWidget {
 class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
   List<SingBoxServerConfig> _servers = const [];
   List<Map<String, dynamic>> _proxyGroups = const [];
+  late String _displayName;
+  DateTime? _lastSyncTime;
   String? _activeId;
   String? _error;
   bool _loading = true;
@@ -3521,6 +4118,7 @@ class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
   @override
   void initState() {
     super.initState();
+    _displayName = widget.displayName;
     _load();
   }
 
@@ -3530,6 +4128,8 @@ class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
       final all = await widget.engine.getServerConfigs();
       final active = await widget.engine.getActiveServerConfig();
       final status = await widget.engine.getConnectionStatus();
+      final names = await _readSubscriptionNames();
+      final syncTimes = await _readSubscriptionSyncTimes();
       final savedGroups = await _readProtectedString(
         _subscriptionGroupsPrefsKey,
       );
@@ -3557,6 +4157,10 @@ class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
           _activeId = active?.id;
           _proxyGroups = parsedGroups;
           _connected = status.isActive;
+          _displayName =
+              names[widget.subscriptionId] ??
+              _subscriptionFallbackName(widget.subscriptionId);
+          _lastSyncTime = syncTimes[widget.subscriptionId];
           _loading = false;
         });
     } on Object catch (error) {
@@ -3720,7 +4324,7 @@ class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
                               const SizedBox(width: 13),
                               Expanded(
                                 child: Text(
-                                  widget.displayName,
+                                  _displayName,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
@@ -3779,15 +4383,19 @@ class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
                               ),
                               IconButton(
                                 tooltip: '订阅设置',
-                                onPressed: () => Navigator.of(context).push(
-                                  MaterialPageRoute<void>(
-                                    builder: (_) => _SubscriptionManagerPage(
-                                      engine: widget.engine,
-                                      globalTun: widget.globalTun,
-                                      downloader: widget.downloader,
+                                onPressed: () async {
+                                  await Navigator.of(context).push<bool>(
+                                    MaterialPageRoute<bool>(
+                                      builder: (_) => _SubscriptionManagerPage(
+                                        engine: widget.engine,
+                                        globalTun: widget.globalTun,
+                                        downloader: widget.downloader,
+                                      ),
                                     ),
-                                  ),
-                                ),
+                                  );
+                                  _changed = true;
+                                  await _load();
+                                },
                                 icon: const Icon(
                                   Icons.more_horiz_rounded,
                                   color: Color(0xFF8190A5),
@@ -3886,6 +4494,7 @@ class _SubscriptionNodesPageState extends State<_SubscriptionNodesPage> {
                                             connected:
                                                 server.id == _activeId &&
                                                 _connected,
+                                            lastSyncTime: _lastSyncTime,
                                             onTap: () {
                                               if (!_selecting) _select(server);
                                             },
@@ -3932,6 +4541,7 @@ class _SubscriptionManagerPage extends StatefulWidget {
 class _SubscriptionManagerPageState extends State<_SubscriptionManagerPage> {
   List<String> _subscriptions = const [];
   Map<String, String> _names = {};
+  Map<String, DateTime> _syncTimes = {};
   final Set<String> _working = {};
   bool _loading = true;
   bool _changed = false;
@@ -3947,6 +4557,7 @@ class _SubscriptionManagerPageState extends State<_SubscriptionManagerPage> {
     try {
       final servers = await widget.engine.getServerConfigs();
       final names = await _readSubscriptionNames();
+      final syncTimes = await _readSubscriptionSyncTimes();
       final subscriptions = servers
           .map((server) => server.subscriptionId)
           .whereType<String>()
@@ -3957,6 +4568,7 @@ class _SubscriptionManagerPageState extends State<_SubscriptionManagerPage> {
         setState(() {
           _subscriptions = subscriptions;
           _names = names;
+          _syncTimes = syncTimes;
           _loading = false;
         });
     } on Object catch (error) {
@@ -4022,8 +4634,19 @@ class _SubscriptionManagerPageState extends State<_SubscriptionManagerPage> {
     );
     controller.dispose();
     if (name == null) return;
-    await _saveSubscriptionName(id, name);
-    await _load();
+    final value = name.trim();
+    await _saveSubscriptionName(id, value);
+    if (mounted) {
+      setState(() {
+        _names = Map<String, String>.from(_names);
+        if (value.isEmpty) {
+          _names.remove(id);
+        } else {
+          _names[id] = value;
+        }
+      });
+    }
+    _changed = true;
   }
 
   Future<void> _refreshLocal(String id) async {
@@ -4126,6 +4749,7 @@ class _SubscriptionManagerPageState extends State<_SubscriptionManagerPage> {
       await widget.engine.clearServerConfigs(subscriptionId: url);
       await _removeSubscriptionGeodata(url);
       await _saveSubscriptionName(url, '');
+      await _removeSubscriptionSyncTime(url);
       if (active != null && group.any((server) => server.id == active.id)) {
         final remaining = await widget.engine.getServerConfigs();
         await widget.engine.setActiveServerConfig(remaining.firstOrNull?.id);
@@ -4275,6 +4899,13 @@ class _SubscriptionManagerPageState extends State<_SubscriptionManagerPage> {
                                             isLocal ? '本地 YAML 配置文件' : url,
                                             maxLines: 1,
                                             overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 10,
+                                              color: Color(0xFF8190A5),
+                                            ),
+                                          ),
+                                          Text(
+                                            '最后同步 · ${_formatSubscriptionSyncTime(_syncTimes[url])}',
                                             style: const TextStyle(
                                               fontSize: 10,
                                               color: Color(0xFF8190A5),
@@ -5747,8 +6378,22 @@ class _SettingsHub extends StatelessWidget {
   );
 }
 
-class _AboutPage extends StatelessWidget {
+class _AboutPage extends StatefulWidget {
   const _AboutPage();
+
+  @override
+  State<_AboutPage> createState() => _AboutPageState();
+}
+
+class _AboutPageState extends State<_AboutPage> {
+  bool _checkingUpdate = false;
+
+  Future<void> _checkUpdates() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    await _checkForAppUpdate(context, showUpToDate: true);
+    if (mounted) setState(() => _checkingUpdate = false);
+  }
 
   Future<void> _openRepository(BuildContext context) async {
     try {
@@ -5906,6 +6551,23 @@ class _AboutPage extends StatelessWidget {
                               ),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _checkingUpdate ? null : _checkUpdates,
+                            icon: _checkingUpdate
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator.adaptive(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.system_update_alt_rounded),
+                            label: Text(_checkingUpdate ? '正在检查…' : '检查更新'),
+                          ),
                         ),
                         const Divider(height: 24),
                         const Center(
@@ -6082,7 +6744,7 @@ class _RuleDataModulesPageState extends State<_RuleDataModulesPage> {
                     ),
                     SizedBox(height: 8),
                     Text(
-                      'GeoIP、GeoSite 和广告规则集优先从本地模块启动。连接成功后每 7 天在后台检查更新；更新下载与替换不会参与连接启动。更新失败会保留当前文件，新的规则在下次连接时加载。',
+                      '导入订阅时会识别其引用的 GeoIP、GeoSite 规则，并立即下载到本地供连接使用。后续连接优先读取本地模块；后台更新失败会保留现有文件，不影响代理。此处可用于内置基础规则的手动修复。',
                       style: TextStyle(
                         color: Color(0xFF71829B),
                         height: 1.5,
@@ -7706,13 +8368,6 @@ class _NetworkAnalysisCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final samples = <double>[];
-    for (var i = 1; i < latencyHistory.length; i++) {
-      samples.add((latencyHistory[i] - latencyHistory[i - 1]).abs());
-    }
-    final jitter = samples.isEmpty
-        ? null
-        : (samples.reduce((a, b) => a + b) / samples.length).round();
     return _Glass(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 15),
       radius: 24,
@@ -7750,7 +8405,7 @@ class _NetworkAnalysisCard extends StatelessWidget {
                     ),
                     SizedBox(height: 2),
                     Text(
-                      '实时流量 · 延迟曲线 · 网络波动',
+                      '实时流量 · 延迟曲线',
                       style: TextStyle(color: Color(0xFF8190A5), fontSize: 10),
                     ),
                   ],
@@ -7818,12 +8473,9 @@ class _NetworkAnalysisCard extends StatelessWidget {
               ),
               _GraphLegend(
                 color: const Color(0xFFE4A453),
-                label:
-                    '延迟 ${latency?.success == true ? '${latency!.ping} ms' : '—'}',
-              ),
-              _GraphLegend(
-                color: const Color(0xFF9A8DE0),
-                label: '波动 ${jitter == null ? '—' : '$jitter ms'}',
+                label: connected && latency?.success == true
+                    ? '延迟 ${latency!.ping} ms'
+                    : '延迟 —',
               ),
             ],
           ),
@@ -7924,7 +8576,7 @@ class _NetworkGraphState extends State<_NetworkGraph>
     _targetActive = widget.active;
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 320),
+      duration: const Duration(milliseconds: 450),
       value: 1,
     );
   }
@@ -8030,19 +8682,21 @@ class _NetworkGraphState extends State<_NetworkGraph>
             child: Stack(
               fit: StackFit.expand,
               children: [
-                CustomPaint(
-                  painter: _NetworkGraphPainter(
-                    fromDownload: _fromDownload,
-                    fromUpload: _fromUpload,
-                    fromLatency: _fromLatency,
-                    toDownload: _toDownload,
-                    toUpload: _toUpload,
-                    toLatency: _toLatency,
-                    active: widget.active,
-                    progress: Curves.easeInOutCubic.transform(
-                      _controller.value,
+                ClipRect(
+                  child: CustomPaint(
+                    painter: _NetworkGraphPainter(
+                      fromDownload: _fromDownload,
+                      fromUpload: _fromUpload,
+                      fromLatency: _fromLatency,
+                      toDownload: _toDownload,
+                      toUpload: _toUpload,
+                      toLatency: _toLatency,
+                      active: widget.active,
+                      progress: Curves.easeInOutCubic.transform(
+                        _controller.value,
+                      ),
+                      probeFraction: _probeFraction,
                     ),
-                    probeFraction: _probeFraction,
                   ),
                 ),
                 if (_probeFraction != null)
@@ -8272,10 +8926,13 @@ class _NetworkGraphPainter extends CustomPainter {
         .round()
         .clamp(0, values.length - 1);
     final maximum = values.fold<double>(1, max);
+    final inset = min(size.height * .18, 14.0);
     final y =
-        size.height -
-        values[index] / maximum * size.height * .7 -
-        size.height * .12;
+        (size.height -
+                values[index] / maximum * size.height * .7 -
+                size.height * .12)
+            .clamp(inset, max(inset, size.height - inset))
+            .toDouble();
     canvas.drawCircle(
       Offset(x, y),
       5,
@@ -8331,6 +8988,9 @@ class _NetworkGraphPainter extends CustomPainter {
     double width,
   ) {
     if (values.isEmpty) return;
+    final verticalInset = min(size.height * .18, max(5.0, width * 4 + 6));
+    final topBound = verticalInset;
+    final bottomBound = max(topBound, size.height - verticalInset);
     final maxValue = [
       ...from,
       ...to,
@@ -8342,9 +9002,11 @@ class _NetworkGraphPainter extends CustomPainter {
           ? size.width
           : 4 + i * (size.width - 8) / (values.length - 1);
       final y =
-          size.height -
-          (values[i] / maxValue * size.height * .7) -
-          size.height * .12;
+          (size.height -
+                  (values[i] / maxValue * size.height * .7) -
+                  size.height * .12)
+              .clamp(topBound, bottomBound)
+              .toDouble();
       points.add(Offset(x, y));
     }
     final line = Path()..moveTo(points.first.dx, points.first.dy);
@@ -8353,11 +9015,19 @@ class _NetworkGraphPainter extends CustomPainter {
       final p1 = points[i];
       final p2 = points[i + 1];
       final p3 = i + 2 < points.length ? points[i + 2] : p2;
-      line.cubicTo(
+      final control1 = Offset(
         p1.dx + (p2.dx - p0.dx) / 6,
-        p1.dy + (p2.dy - p0.dy) / 6,
+        (p1.dy + (p2.dy - p0.dy) / 6).clamp(topBound, bottomBound).toDouble(),
+      );
+      final control2 = Offset(
         p2.dx - (p3.dx - p1.dx) / 6,
-        p2.dy - (p3.dy - p1.dy) / 6,
+        (p2.dy - (p3.dy - p1.dy) / 6).clamp(topBound, bottomBound).toDouble(),
+      );
+      line.cubicTo(
+        control1.dx,
+        control1.dy,
+        control2.dx,
+        control2.dy,
         p2.dx,
         p2.dy,
       );
@@ -8528,6 +9198,7 @@ class _ServerTile extends StatelessWidget {
     required this.connected,
     required this.onTap,
     required this.onDelete,
+    this.lastSyncTime,
     this.result,
     this.testing = false,
     this.onTest,
@@ -8535,6 +9206,7 @@ class _ServerTile extends StatelessWidget {
   final SingBoxServerConfig server;
   final bool active, connected;
   final VoidCallback onTap, onDelete;
+  final DateTime? lastSyncTime;
   final SingBoxPingResult? result;
   final bool testing;
   final VoidCallback? onTest;
@@ -8594,6 +9266,16 @@ class _ServerTile extends StatelessWidget {
                         color: Color(0xFF8090A6),
                       ),
                     ),
+                    if (lastSyncTime != null) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        '最后同步 · ${_formatSubscriptionSyncTime(lastSyncTime)}',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF8190A5),
+                        ),
+                      ),
+                    ],
                     if (result != null) ...[
                       const SizedBox(height: 4),
                       Text(

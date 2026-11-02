@@ -1549,28 +1549,19 @@ class _SettingScreenState extends LasyRenderingState<SettingsScreen> {
     }
 
     //item-beta://testflight.apple.com/join/RLU59OsJ or https://testflight.apple.com/join/RLU59OsJ
-    var remoteConfig = RemoteConfigManager.getConfig();
-    String url = remoteConfig.download.isEmpty
-        ? versionCheck.url
-        : remoteConfig.download;
     if (AutoUpdateManager.isSupport()) {
-      String? installerNew = await AutoUpdateManager.checkReplace();
-      if (installerNew != null) {
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            settings: VersionUpdateScreen.routeSettings(),
-            builder: (context) => const VersionUpdateScreen(),
-          ),
-        );
-      } else {
-        await UrlLauncherUtils.loadUrl(
-          url,
-          mode: LaunchMode.externalApplication,
-        );
-      }
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          settings: VersionUpdateScreen.routeSettings(),
+          builder: (context) => const VersionUpdateScreen(),
+        ),
+      );
     } else {
-      await UrlLauncherUtils.loadUrl(url, mode: LaunchMode.externalApplication);
+      await UrlLauncherUtils.loadUrl(
+        versionCheck.releaseUrl,
+        mode: LaunchMode.externalApplication,
+      );
     }
   }
 

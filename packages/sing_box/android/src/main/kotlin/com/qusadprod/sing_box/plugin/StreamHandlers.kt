@@ -121,9 +121,12 @@ internal abstract class CommandStreamHandler(private val scope: CoroutineScope) 
     }
 }
 
-/** `sing_box/stats`: `CommandStatus` every second. */
+/** `sing_box/stats`: faster `CommandStatus` updates for the live dashboard. */
 internal class StatsStreamHandler(scope: CoroutineScope) : CommandStreamHandler(scope) {
-    override fun createSession() = object : CommandSession(Libbox.CommandStatus) {
+    override fun createSession() = object : CommandSession(
+        Libbox.CommandStatus,
+        statusIntervalNs = CommandSession.FAST_STATUS_INTERVAL_NS,
+    ) {
         override fun onStatus(message: StatusMessage) = sink.success(Converters.status(message))
     }
 }

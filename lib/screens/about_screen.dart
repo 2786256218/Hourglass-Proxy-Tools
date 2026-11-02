@@ -29,6 +29,7 @@ import 'package:hourglass/screens/hash_string_screen.dart';
 import 'package:hourglass/screens/theme_config.dart';
 import 'package:hourglass/screens/webview_helper.dart';
 import 'package:hourglass/screens/widgets/framework.dart';
+import 'package:hourglass/screens/version_update_screen.dart';
 import 'package:path/path.dart' as path;
 import 'package:tuple/tuple.dart';
 
@@ -44,6 +45,8 @@ class AboutScreen extends LasyRenderingStatefulWidget {
 }
 
 class AboutScreenState extends LasyRenderingState<AboutScreen> {
+  bool _checkingUpdates = false;
+
   @override
   void initState() {
     super.initState();
@@ -157,6 +160,31 @@ class AboutScreenState extends LasyRenderingState<AboutScreen> {
     return await Biz.startOrRestartIfDirtyVPN(context, "AboutScreen");
   }
 
+  Future<void> onTapCheckUpdates() async {
+    if (_checkingUpdates) {
+      return;
+    }
+    setState(() => _checkingUpdates = true);
+    final isChinese = Localizations.localeOf(context).languageCode == 'zh';
+    final result = await AutoUpdateManager.checkNow(notify: false);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _checkingUpdates = false);
+    if (result == UpdateCheckStatus.available) {
+      await VersionUpdateScreen.showUpdatePrompt(context);
+      return;
+    }
+    await DialogUtils.showAlertDialog(
+      context,
+      result == UpdateCheckStatus.upToDate
+          ? (isChinese ? '当前已是最新版本。' : 'You are using the latest version.')
+          : (isChinese
+                ? '暂时无法访问 GitHub，请检查网络后重试。'
+                : 'GitHub is temporarily unreachable. Check your network and try again.'),
+    );
+  }
+
   Future<List<GroupItem>> getGroupOptions() async {
     final tcontext = Translations.of(context);
     var settingConfig = SettingManager.getConfig();
@@ -191,6 +219,20 @@ class AboutScreenState extends LasyRenderingState<AboutScreen> {
             text: AppUtils.getBuildinVersion(),
           ),
         ),
+        if (AutoUpdateManager.isSupport())
+          GroupItemOptions(
+            pushOptions: GroupItemPushOptions(
+              name: Localizations.localeOf(context).languageCode == 'zh'
+                  ? '检查更新'
+                  : 'Check for updates',
+              text: _checkingUpdates
+                  ? (Localizations.localeOf(context).languageCode == 'zh'
+                        ? '正在检查…'
+                        : 'Checking…')
+                  : null,
+              onPush: _checkingUpdates ? null : onTapCheckUpdates,
+            ),
+          ),
         GroupItemOptions(
           textOptions: GroupItemTextOptions(
             name: tcontext.AboutScreen.installRefer,

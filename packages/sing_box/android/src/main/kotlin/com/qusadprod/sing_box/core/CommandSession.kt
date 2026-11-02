@@ -32,6 +32,7 @@ internal abstract class CommandSession(
     private val command: Int,
     /** Reconnect after every successful reload (for streams bound to a box instance). */
     private val reconnectOnReload: Boolean = false,
+    private val statusIntervalNs: Long = STATUS_INTERVAL_NS,
 ) {
     private val lock = Any()
     private var job: Job? = null
@@ -91,7 +92,7 @@ internal abstract class CommandSession(
                 myEpoch = ++epoch
                 val options = CommandClientOptions().apply {
                     addCommand(command)
-                    statusInterval = STATUS_INTERVAL_NS
+                    statusInterval = statusIntervalNs
                 }
                 newClient = Libbox.newCommandClient(Handler(myEpoch, disconnected), options)
                 client = newClient
@@ -171,5 +172,6 @@ internal abstract class CommandSession(
         private const val TAG = "sing_box"
         const val RETRY_MS = 1000L
         const val STATUS_INTERVAL_NS = 1_000_000_000L
+        const val FAST_STATUS_INTERVAL_NS = 500_000_000L
     }
 }
