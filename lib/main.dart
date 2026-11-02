@@ -8576,7 +8576,7 @@ class _NetworkGraphState extends State<_NetworkGraph>
     _targetActive = widget.active;
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 450),
+      duration: const Duration(milliseconds: 560),
       value: 1,
     );
   }
