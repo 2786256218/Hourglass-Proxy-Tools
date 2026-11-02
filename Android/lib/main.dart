@@ -406,6 +406,7 @@ const _residentialSiteTargets = <_ResidentialSiteTarget>[
     groupTag: 'hourglass-check-openai',
   ),
 ];
+const _residentialTestTimeoutOptions = [5, 10, 15, 20, 30];
 
 class _ResidentialSiteTarget {
   const _ResidentialSiteTarget({
@@ -438,30 +439,32 @@ class _ResidentialProxySettings {
     this.port = 1080,
     this.username = '',
     this.password = '',
+    this.testTimeoutSeconds = 15,
   });
 
   final bool enabled;
   final String mode, protocol, server, username, password;
-  final int port;
+  final int port, testTimeoutSeconds;
 
-  factory _ResidentialProxySettings.fromMap(Map<dynamic, dynamic> map) =>
-      _ResidentialProxySettings(
-        enabled: map['enabled'] as bool? ?? false,
-        mode: map['mode'] == 'chain' ? 'chain' : 'direct',
-        protocol:
-            const {
-              'socks5',
-              'socks4',
-              'http',
-              'https',
-            }.contains(map['protocol'])
-            ? map['protocol'] as String
-            : 'socks5',
-        server: map['server'] as String? ?? '',
-        port: (map['port'] as num?)?.toInt() ?? 1080,
-        username: map['username'] as String? ?? '',
-        password: map['password'] as String? ?? '',
-      );
+  factory _ResidentialProxySettings.fromMap(Map<dynamic, dynamic> map) {
+    final timeoutSeconds = (map['testTimeoutSeconds'] as num?)?.toInt() ?? 15;
+    return _ResidentialProxySettings(
+      enabled: map['enabled'] as bool? ?? false,
+      mode: map['mode'] == 'chain' ? 'chain' : 'direct',
+      protocol:
+          const {'socks5', 'socks4', 'http', 'https'}.contains(map['protocol'])
+          ? map['protocol'] as String
+          : 'socks5',
+      server: map['server'] as String? ?? '',
+      port: (map['port'] as num?)?.toInt() ?? 1080,
+      username: map['username'] as String? ?? '',
+      password: map['password'] as String? ?? '',
+      testTimeoutSeconds:
+          _residentialTestTimeoutOptions.contains(timeoutSeconds)
+          ? timeoutSeconds
+          : 15,
+    );
+  }
 
   Map<String, dynamic> toMap() => {
     'enabled': enabled,
@@ -471,6 +474,7 @@ class _ResidentialProxySettings {
     'port': port,
     'username': username,
     'password': password,
+    'testTimeoutSeconds': testTimeoutSeconds,
   };
 
   _ResidentialProxySettings copyWith({
@@ -481,6 +485,7 @@ class _ResidentialProxySettings {
     int? port,
     String? username,
     String? password,
+    int? testTimeoutSeconds,
   }) => _ResidentialProxySettings(
     enabled: enabled ?? this.enabled,
     mode: mode ?? this.mode,
@@ -489,6 +494,7 @@ class _ResidentialProxySettings {
     port: port ?? this.port,
     username: username ?? this.username,
     password: password ?? this.password,
+    testTimeoutSeconds: testTimeoutSeconds ?? this.testTimeoutSeconds,
   );
 }
 
@@ -3448,83 +3454,83 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
       });
       return;
     }
-    setState(() => _testingAll = true);
-    try {
+    final timeout = Duration(seconds: _value.testTimeoutSeconds);
+    setState(() {
+      _testingAll = true;
+      _testingSites
+        ..clear()
+        ..addAll(_residentialSiteTargets.map((site) => site.id));
       for (final site in _residentialSiteTargets) {
-        await _testSite(site, fromBatch: true);
+        _siteResults.remove(site.id);
       }
+    });
+    try {
+      await Future.wait(
+        _residentialSiteTargets.map(
+          (site) => _testSite(site, timeout: timeout),
+        ),
+      );
     } finally {
-      if (mounted) setState(() => _testingAll = false);
+      if (mounted) {
+        setState(() {
+          _testingAll = false;
+          _testingSites.clear();
+        });
+      }
     }
   }
 
   Future<void> _testSite(
     _ResidentialSiteTarget site, {
-    bool fromBatch = false,
+    required Duration timeout,
   }) async {
-    if (!_value.enabled ||
-        !widget.engine.isConnected ||
-        _testingSites.contains(site.id) ||
-        (_testingSites.isNotEmpty && !fromBatch) ||
-        (_testingAll && !fromBatch)) {
-      return;
-    }
-    setState(() {
-      _testingSites.add(site.id);
-      _siteResults.remove(site.id);
-    });
-    _ResidentialSiteResult? successResult;
-    var lastError = '测试地址暂时没有返回有效结果';
-    var timedOut = true;
+    var result = const _ResidentialSiteResult(
+      success: false,
+      detail: '测试地址暂时没有返回有效结果',
+    );
     try {
-      for (var attempt = 0; attempt < 2; attempt++) {
-        final startedAt = DateTime.now().subtract(const Duration(seconds: 1));
-        try {
-          final group = await widget.engine.testGroup(
-            site.groupTag,
-            timeout: const Duration(seconds: 22),
-          );
-          final item = group?.items
-              .where((candidate) => candidate.tag == 'hourglass-residential-ip')
-              .firstOrNull;
-          final fresh =
-              item?.urlTestTime != null &&
-              !item!.urlTestTime!.isBefore(startedAt);
-          final delay = item?.urlTestDelay;
-          if (fresh && delay != null) {
-            successResult = _ResidentialSiteResult(
-              success: true,
-              delayMs: delay,
-              detail: '经住宅 IP 测试成功',
-            );
-            break;
-          }
-          lastError = item == null ? '没有收到住宅代理的测速结果' : '测试目标未返回有效结果';
-          timedOut = true;
-        } on TimeoutException {
-          lastError = '连接超时';
-          timedOut = true;
-        } on Object catch (error) {
-          lastError = error.toString().replaceFirst('Exception: ', '');
-          timedOut = false;
-        }
-        if (attempt == 0) {
-          await Future<void>.delayed(const Duration(milliseconds: 800));
-        }
+      final startedAt = DateTime.now().subtract(const Duration(seconds: 1));
+      final group = await widget.engine
+          .testGroup(site.groupTag, timeout: timeout)
+          .timeout(timeout);
+      final item = group?.items
+          .where((candidate) => candidate.tag == 'hourglass-residential-ip')
+          .firstOrNull;
+      final fresh =
+          item?.urlTestTime != null && !item!.urlTestTime!.isBefore(startedAt);
+      final delay = item?.urlTestDelay;
+      if (fresh && delay != null) {
+        result = _ResidentialSiteResult(
+          success: true,
+          delayMs: delay,
+          detail: '经住宅 IP 测试成功',
+        );
+      } else {
+        result = _ResidentialSiteResult(
+          success: false,
+          timedOut: true,
+          detail: item == null ? '没有收到住宅代理测速结果' : '测试目标未在时限内返回结果',
+        );
       }
+    } on TimeoutException {
+      result = _ResidentialSiteResult(
+        success: false,
+        timedOut: true,
+        detail: '超过 ${timeout.inSeconds} 秒，已停止等待',
+      );
+    } on Object catch (error) {
+      result = _ResidentialSiteResult(
+        success: false,
+        timedOut: false,
+        detail: error.toString().replaceFirst('Exception: ', ''),
+      );
+    } finally {
       if (mounted) {
         setState(() {
-          _siteResults[site.id] =
-              successResult ??
-              _ResidentialSiteResult(
-                success: false,
-                timedOut: timedOut,
-                detail: '重试后仍失败：$lastError',
-              );
+          _siteResults[site.id] = result;
+          _testingSites.remove(site.id);
         });
       }
-    } finally {
-      if (mounted) setState(() => _testingSites.remove(site.id));
     }
   }
 
@@ -3870,7 +3876,7 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
                                           Icons.refresh_rounded,
                                           size: 17,
                                         ),
-                                  label: const Text('全部检测'),
+                                  label: const Text('并行检测'),
                                 ),
                               ],
                             ),
@@ -3882,6 +3888,59 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
                               style: const TextStyle(
                                 color: Color(0xFF8190A5),
                                 fontSize: 10,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                const Icon(
+                                  Icons.timer_outlined,
+                                  size: 16,
+                                  color: Color(0xFF8190A5),
+                                ),
+                                const SizedBox(width: 6),
+                                const Text(
+                                  '每个平台超时',
+                                  style: TextStyle(
+                                    color: Color(0xFF64758C),
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                const Spacer(),
+                                DropdownButtonHideUnderline(
+                                  child: DropdownButton<int>(
+                                    value: _value.testTimeoutSeconds,
+                                    borderRadius: BorderRadius.circular(12),
+                                    isDense: true,
+                                    items: _residentialTestTimeoutOptions
+                                        .map(
+                                          (seconds) => DropdownMenuItem<int>(
+                                            value: seconds,
+                                            child: Text('$seconds 秒'),
+                                          ),
+                                        )
+                                        .toList(),
+                                    onChanged: _testingAll
+                                        ? null
+                                        : (seconds) {
+                                            if (seconds == null) return;
+                                            setState(
+                                              () => _value = _value.copyWith(
+                                                testTimeoutSeconds: seconds,
+                                              ),
+                                            );
+                                          },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            const Text(
+                              'GitHub、Google、YouTube、OpenAI 同时检测；单项超时会单独显示，不会拖住其他结果。',
+                              style: TextStyle(
+                                color: Color(0xFF8190A5),
+                                fontSize: 10,
+                                height: 1.35,
                               ),
                             ),
                             const SizedBox(height: 12),
@@ -3902,7 +3961,6 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
                                         enabled:
                                             _value.enabled &&
                                             widget.engine.isConnected,
-                                        onTest: () => _testSite(site),
                                       ),
                                     ),
                                 ],
@@ -3949,13 +4007,11 @@ class _ResidentialSiteCard extends StatelessWidget {
     required this.result,
     required this.testing,
     required this.enabled,
-    required this.onTest,
   });
 
   final _ResidentialSiteTarget site;
   final _ResidentialSiteResult? result;
   final bool testing, enabled;
-  final VoidCallback onTest;
 
   Color get _brandColor => switch (site.id) {
     'github' => const Color(0xFF202832),
@@ -4052,21 +4108,24 @@ class _ResidentialSiteCard extends StatelessWidget {
                 child: _brandIcon(),
               ),
               const Spacer(),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                tooltip: '检测 ${site.title}',
-                onPressed: enabled && !testing ? onTest : null,
-                icon: testing
-                    ? const SizedBox(
-                        width: 15,
-                        height: 15,
-                        child: CircularProgressIndicator.adaptive(
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Icon(Icons.refresh_rounded, size: 17),
-                color: _blue,
-              ),
+              if (testing)
+                const SizedBox(
+                  width: 15,
+                  height: 15,
+                  child: CircularProgressIndicator.adaptive(strokeWidth: 2),
+                )
+              else
+                Icon(
+                  result?.success == true
+                      ? Icons.check_circle_outline_rounded
+                      : enabled
+                      ? Icons.network_check_rounded
+                      : Icons.remove_circle_outline_rounded,
+                  size: 17,
+                  color: result?.success == true
+                      ? _mint
+                      : const Color(0xFF9AA7B8),
+                ),
             ],
           ),
           const SizedBox(height: 6),
