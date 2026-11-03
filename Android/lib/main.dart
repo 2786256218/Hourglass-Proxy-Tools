@@ -33,6 +33,7 @@ const _residentialProxyPrefsKey = 'hourglass.residentialProxy.v1';
 const _autoSelectPrefsKey = 'hourglass.autoSelectEnabled.v1';
 const _residentialProbeResultId = 'hourglass-residential-active';
 const _protectedStorageChannel = MethodChannel('hourglass.secure_storage');
+const _websiteAvailabilityTimeout = Duration(seconds: 10);
 const _bundledRuleSetAssets = <String, String>{
   'geoip-cn': 'assets/datas/geoip/cn.srs',
   'geosite-cn': 'assets/datas/geosite/cn.srs',
@@ -406,7 +407,7 @@ const _residentialSiteTargets = <_ResidentialSiteTarget>[
     groupTag: 'hourglass-check-openai',
   ),
 ];
-const _residentialTestTimeoutOptions = [5, 10, 15, 20, 30];
+const _residentialTestTimeoutOptions = [5, 10];
 
 class _ResidentialSiteTarget {
   const _ResidentialSiteTarget({
@@ -439,7 +440,7 @@ class _ResidentialProxySettings {
     this.port = 1080,
     this.username = '',
     this.password = '',
-    this.testTimeoutSeconds = 15,
+    this.testTimeoutSeconds = 10,
   });
 
   final bool enabled;
@@ -447,7 +448,7 @@ class _ResidentialProxySettings {
   final int port, testTimeoutSeconds;
 
   factory _ResidentialProxySettings.fromMap(Map<dynamic, dynamic> map) {
-    final timeoutSeconds = (map['testTimeoutSeconds'] as num?)?.toInt() ?? 15;
+    final timeoutSeconds = (map['testTimeoutSeconds'] as num?)?.toInt() ?? 10;
     return _ResidentialProxySettings(
       enabled: map['enabled'] as bool? ?? false,
       mode: map['mode'] == 'chain' ? 'chain' : 'direct',
@@ -462,7 +463,7 @@ class _ResidentialProxySettings {
       testTimeoutSeconds:
           _residentialTestTimeoutOptions.contains(timeoutSeconds)
           ? timeoutSeconds
-          : 15,
+          : 10,
     );
   }
 
@@ -1456,6 +1457,8 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   bool _globalTun = false;
   _HourglassOverrides _overrides = const _HourglassOverrides();
   _ResidentialProxySettings _residential = const _ResidentialProxySettings();
+  Completer<void>? _residentialReadyCompleter;
+  Map<String, _ResidentialSiteResult> _residentialConnectionResults = {};
   final Map<String, SingBoxPingResult> _probeResults = {};
   SingBoxPingResult? _liveGraphLatency;
   Map<String, String> _subscriptionNames = {};
@@ -1473,6 +1476,9 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   bool _autoSelectEnabled = false;
   bool _savingAutoSelect = false;
   bool _autoSelecting = false;
+  int _nodeSelectionRevision = 0;
+  Future<void> _outboundSelectionQueue = Future<void>.value();
+  int _residentialConnectionEpoch = 0;
   Timer? _autoSelectTimer;
   DateTime? _lastAutoSelectionAt;
   DateTime? _lastStatsUiAt;
@@ -1584,14 +1590,24 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       });
       _syncStatsSubscription();
       _groupsSub = _engine.watchGroups().listen((groups) {
-        final selectedTag = groups
-            .where((group) => group.selectable)
-            .map((group) => group.selected)
-            .where((tag) => tag.isNotEmpty)
+        // Only the main proxy selector represents the active server. Other
+        // selectors (including URL-test and residential probe groups) can
+        // publish unrelated selections and must never overwrite this state.
+        if (_busy || _autoSelecting) return;
+        final selector = groups
+            .where(
+              (group) =>
+                  group.tag == SingBoxConfigBuilder.proxyTag &&
+                  group.selectable,
+            )
             .firstOrNull;
-        if (selectedTag == null) return;
+        final selectedTag = selector?.selected;
+        if (selectedTag == null || selectedTag.isEmpty) return;
+        final tagsById = _outboundTagsFor(
+          _servers.where((profile) => profile.enabled),
+        );
         final profile = _servers
-            .where((item) => item.name == selectedTag)
+            .where((item) => tagsById[item.id] == selectedTag)
             .firstOrNull;
         if (profile != null && profile.id != _activeId) {
           if (mounted) setState(() => _activeId = profile.id);
@@ -1664,6 +1680,12 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       return;
     }
     _lastStatsUiAt = now;
+    final nonNegativeStats = stats.copyWith(
+      downloadSpeed: stats.downloadSpeed.clamp(0, 0x7fffffff).toInt(),
+      uploadSpeed: stats.uploadSpeed.clamp(0, 0x7fffffff).toInt(),
+      downloadTotal: stats.downloadTotal.clamp(0, 0x7fffffffffffffff).toInt(),
+      uploadTotal: stats.uploadTotal.clamp(0, 0x7fffffffffffffff).toInt(),
+    );
     final previousAt = _lastTrafficTotalsSampleAt;
     final previousDownload = _lastDownloadTotal;
     final previousUpload = _lastUploadTotal;
@@ -1676,20 +1698,30 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         elapsed <= 3 &&
         previousDownload != null &&
         previousUpload != null &&
-        stats.downloadTotal >= previousDownload &&
-        stats.uploadTotal >= previousUpload;
-    final measuredStats = hasUsableDelta
-        ? stats.copyWith(
+        nonNegativeStats.downloadTotal >= previousDownload &&
+        nonNegativeStats.uploadTotal >= previousUpload;
+    final countersReset =
+        previousDownload != null &&
+        previousUpload != null &&
+        (nonNegativeStats.downloadTotal < previousDownload ||
+            nonNegativeStats.uploadTotal < previousUpload);
+    final measuredStats = countersReset
+        ? nonNegativeStats.copyWith(downloadSpeed: 0, uploadSpeed: 0)
+        : hasUsableDelta
+        ? nonNegativeStats.copyWith(
             downloadSpeed:
-                ((stats.downloadTotal - previousDownload!) / elapsed!).round(),
-            uploadSpeed: ((stats.uploadTotal - previousUpload!) / elapsed!)
-                .round(),
+                ((nonNegativeStats.downloadTotal - previousDownload!) /
+                        elapsed!)
+                    .round(),
+            uploadSpeed:
+                ((nonNegativeStats.uploadTotal - previousUpload!) / elapsed!)
+                    .round(),
           )
-        : stats;
+        : nonNegativeStats;
     _stats = measuredStats;
     _lastTrafficTotalsSampleAt = now;
-    _lastDownloadTotal = stats.downloadTotal;
-    _lastUploadTotal = stats.uploadTotal;
+    _lastDownloadTotal = nonNegativeStats.downloadTotal;
+    _lastUploadTotal = nonNegativeStats.uploadTotal;
     final active = _servers
         .where((server) => server.id == _activeId)
         .firstOrNull;
@@ -1975,6 +2007,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         .where((server) => server.enabled && !_isLoopbackProfile(server))
         .toList();
     if (targets.isEmpty) return;
+    final selectionRevision = _nodeSelectionRevision;
     _autoSelecting = true;
     _lastAutoSelectionAt = DateTime.now();
     try {
@@ -1984,6 +2017,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         timeout: const Duration(seconds: 60),
       );
       if (!_autoSelectEnabled ||
+          selectionRevision != _nodeSelectionRevision ||
           _connection.status != SingBoxConnectionStatus.connected ||
           group == null) {
         return;
@@ -2012,13 +2046,15 @@ class _ProxyHomePageState extends State<ProxyHomePage>
             .firstOrNull;
         if (server == null) continue;
         if (!_autoSelectEnabled ||
+            selectionRevision != _nodeSelectionRevision ||
             _connection.status != SingBoxConnectionStatus.connected) {
           return;
         }
-        await _engine.selectOutbound(
-          SingBoxConfigBuilder.proxyTag,
+        final selected = await _queueOutboundSelection(
           candidate.tag,
+          selectionRevision,
         );
+        if (!selected || selectionRevision != _nodeSelectionRevision) return;
         await _engine.setActiveServerConfig(server.id);
         if (!mounted) return;
         setState(() {
@@ -2072,56 +2108,57 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     _notice('正在经当前代理访问 Google 测试地址…');
     try {
       SingBoxPingResult? result;
-      for (var attempt = 0; attempt < 2; attempt++) {
-        try {
-          if (residentialActive) {
-            final startedAt = DateTime.now().subtract(
-              const Duration(seconds: 1),
-            );
-            final group = await _engine.testGroup(
-              'hourglass-check-google',
-              timeout: const Duration(seconds: 20),
-            );
-            final item = group?.items
-                .where(
-                  (candidate) => candidate.tag == 'hourglass-residential-ip',
+      try {
+        if (residentialActive) {
+          final startedAt = DateTime.now().subtract(const Duration(seconds: 1));
+          final group = await _engine
+              .testGroup(
+                'hourglass-check-google',
+                timeout: _websiteAvailabilityTimeout,
+              )
+              .timeout(_websiteAvailabilityTimeout);
+          final item = group?.items
+              .where((candidate) => candidate.tag == 'hourglass-residential-ip')
+              .firstOrNull;
+          final fresh =
+              item?.urlTestTime != null &&
+              !item!.urlTestTime!.isBefore(startedAt);
+          result = fresh && item?.urlTestDelay != null
+              ? SingBoxPingResult(
+                  ping: item!.urlTestDelay!,
+                  success: true,
+                  tag: item.tag,
+                  serverId: _residentialProbeResultId,
                 )
-                .firstOrNull;
-            final fresh =
-                item?.urlTestTime != null &&
-                !item!.urlTestTime!.isBefore(startedAt);
-            result = fresh && item?.urlTestDelay != null
-                ? SingBoxPingResult(
-                    ping: item!.urlTestDelay!,
-                    success: true,
-                    tag: item.tag,
-                    serverId: _residentialProbeResultId,
-                  )
-                : SingBoxPingResult.failure(
-                    'Google 测试地址暂时无响应',
-                    tag: item?.tag ?? 'hourglass-residential-ip',
-                    serverId: _residentialProbeResultId,
-                  );
-          } else {
-            result = await _engine
-                .pingServers(
-                  [active!],
-                  concurrency: 1,
-                  timeout: const Duration(seconds: 18),
-                  testParentGroup: false,
-                )
-                .first;
-            result = result.forServer(active.id);
-          }
-        } on Object catch (error) {
-          result = SingBoxPingResult.failure(
-            _friendlyError(error),
-            tag: active?.name ?? 'hourglass-residential-ip',
-            serverId: active?.id ?? _residentialProbeResultId,
-          );
+              : SingBoxPingResult.failure(
+                  'Google 测试地址暂时无响应',
+                  tag: item?.tag ?? 'hourglass-residential-ip',
+                  serverId: _residentialProbeResultId,
+                );
+        } else {
+          result = await _engine
+              .pingServers(
+                [active!],
+                concurrency: 1,
+                timeout: _websiteAvailabilityTimeout,
+                testParentGroup: false,
+              )
+              .first
+              .timeout(_websiteAvailabilityTimeout);
+          result = result.forServer(active.id);
         }
-        if (result.success || attempt == 1) break;
-        await Future<void>.delayed(const Duration(milliseconds: 700));
+      } on TimeoutException {
+        result = SingBoxPingResult.failure(
+          '10 秒内没有收到测试结果',
+          tag: active?.name ?? 'hourglass-residential-ip',
+          serverId: active?.id ?? _residentialProbeResultId,
+        );
+      } on Object catch (error) {
+        result = SingBoxPingResult.failure(
+          _friendlyError(error),
+          tag: active?.name ?? 'hourglass-residential-ip',
+          serverId: active?.id ?? _residentialProbeResultId,
+        );
       }
       final availabilityResult = _rejectSuspiciousNodeLatency(result!);
       if (!mounted) return;
@@ -2185,6 +2222,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     if (_connection.status.isActive) {
       setState(() => _busy = true);
       try {
+        _residentialConnectionEpoch++;
         await _engine.disconnect();
       } on Object catch (error) {
         _notice(_friendlyError(error));
@@ -2232,15 +2270,181 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   }
 
   Future<void> _connectProfile(SingBoxServerConfig? selected) async {
+    final epoch = ++_residentialConnectionEpoch;
     if (selected != null && _isLoopbackProfile(selected)) {
       throw const FormatException(
         '当前选中节点地址为 127.0.0.1 / localhost，无法连接；请更新订阅或选择有效节点',
       );
     }
+    final residentialEnabled = _residential.enabled;
+    final chainMode = residentialEnabled && _residential.mode == 'chain';
+    if (chainMode && selected == null) {
+      throw const FormatException('住宅 IP 链式模式需要先选择一个有效的普通代理节点');
+    }
+    final readyCompleter = residentialEnabled ? Completer<void>() : null;
+    if (readyCompleter != null) {
+      _residentialReadyCompleter = readyCompleter;
+    }
+
+    try {
+      await _connectProfileConfig(selected, includeResidential: !chainMode);
+      if (residentialEnabled) {
+        _residentialConnectionResults = {};
+        if (chainMode) {
+          // Let the upstream tunnel settle before applying the residential
+          // outbound. The second config application is intentional: some
+          // Android cores fail to activate a newly selected chained outbound
+          // reliably through a live selector update.
+          await Future<void>.delayed(const Duration(seconds: 5));
+          if (!_isCurrentResidentialConnection(epoch)) {
+            _completeResidentialConnection(readyCompleter);
+            return;
+          }
+          await _connectProfileConfig(selected, includeResidential: true);
+        }
+        unawaited(
+          _finishResidentialConnection(
+            epoch: epoch,
+            chainMode: chainMode,
+            readyCompleter: readyCompleter!,
+          ),
+        );
+      } else {
+        _completeResidentialConnection(readyCompleter);
+      }
+    } on Object {
+      _completeResidentialConnection(readyCompleter);
+      rethrow;
+    }
+  }
+
+  Future<void> _finishResidentialConnection({
+    required int epoch,
+    required bool chainMode,
+    required Completer<void> readyCompleter,
+  }) async {
+    try {
+      // Probe only after the chain config has finished applying and had time
+      // to settle. Keep this work separate from the VPN reconfiguration so
+      // later node changes cannot overlap a delayed config reload.
+      await Future<void>.delayed(const Duration(seconds: 5));
+      if (!_isCurrentResidentialConnection(epoch)) return;
+      _residentialConnectionResults = await _runResidentialConnectionTests();
+      if (chainMode && epoch == _residentialConnectionEpoch) {
+        if (!_residentialConnectionResults.values.any(
+          (result) => result.success,
+        )) {
+          _notice('住宅代理连通性检测失败；链式模式未降级到普通节点，请检查住宅代理地址、协议和认证信息');
+        }
+      }
+    } on Object catch (error) {
+      if (epoch == _residentialConnectionEpoch && mounted) {
+        if (chainMode) {
+          _notice('住宅链路测速失败：${_friendlyError(error)}');
+        } else {
+          _notice('住宅 IP 连接或测速失败：${_friendlyError(error)}');
+        }
+      }
+    } finally {
+      _completeResidentialConnection(readyCompleter);
+    }
+  }
+
+  void _completeResidentialConnection(Completer<void>? completer) {
+    if (completer == null) return;
+    if (identical(_residentialReadyCompleter, completer)) {
+      _residentialReadyCompleter = null;
+    }
+    if (!completer.isCompleted) completer.complete();
+  }
+
+  Future<Map<String, _ResidentialSiteResult>>
+  _waitForResidentialConnectionReady() async {
+    while (true) {
+      final pending = _residentialReadyCompleter;
+      if (pending == null) return Map.of(_residentialConnectionResults);
+      await pending.future;
+      if (identical(_residentialReadyCompleter, pending) ||
+          _residentialReadyCompleter == null) {
+        return Map.of(_residentialConnectionResults);
+      }
+    }
+  }
+
+  bool _isCurrentResidentialConnection(int epoch) =>
+      epoch == _residentialConnectionEpoch &&
+      _residential.enabled &&
+      _engine.isConnected;
+
+  Future<Map<String, _ResidentialSiteResult>>
+  _runResidentialConnectionTests() async {
+    if (!_residential.enabled || !_engine.isConnected) return const {};
+    final timeout = Duration(seconds: _residential.testTimeoutSeconds);
+    final startedAt = DateTime.now().subtract(const Duration(seconds: 1));
+    try {
+      final entries = await Future.wait(
+        _residentialSiteTargets.map((site) async {
+          try {
+            final group = await _engine
+                .testGroup(site.groupTag, timeout: timeout)
+                .timeout(timeout);
+            final item = group?.items
+                .where(
+                  (candidate) => candidate.tag == 'hourglass-residential-ip',
+                )
+                .firstOrNull;
+            final fresh =
+                item?.urlTestTime != null &&
+                !item!.urlTestTime!.isBefore(startedAt);
+            final delay = item?.urlTestDelay;
+            return MapEntry(
+              site.id,
+              fresh && delay != null
+                  ? _ResidentialSiteResult(
+                      success: true,
+                      delayMs: delay,
+                      detail: '经住宅 IP 测试成功',
+                    )
+                  : _ResidentialSiteResult(
+                      success: false,
+                      timedOut: true,
+                      detail: item == null ? '没有收到住宅代理测速结果' : '测试目标未在时限内返回结果',
+                    ),
+            );
+          } on TimeoutException {
+            return MapEntry(
+              site.id,
+              _ResidentialSiteResult(
+                success: false,
+                timedOut: true,
+                detail: '超过 ${timeout.inSeconds} 秒，已停止等待',
+              ),
+            );
+          } on Object catch (error) {
+            return MapEntry(
+              site.id,
+              _ResidentialSiteResult(
+                success: false,
+                detail: error.toString().replaceFirst('Exception: ', ''),
+              ),
+            );
+          }
+        }),
+      );
+      return Map.fromEntries(entries);
+    } finally {
+      await _restartStatsSubscription();
+    }
+  }
+
+  Future<void> _connectProfileConfig(
+    SingBoxServerConfig? selected, {
+    required bool includeResidential,
+  }) async {
     final profiles = _servers.where((profile) => profile.enabled).toList();
     _applyOverridesToEngine();
     final geodataRules = await _loadGeodataRules();
-    final residentialEnabled = _residential.enabled;
+    final residentialEnabled = includeResidential && _residential.enabled;
     final residentialDirect =
         residentialEnabled && _residential.mode == 'direct';
     {
@@ -2248,43 +2452,48 @@ class _ProxyHomePageState extends State<ProxyHomePage>
           (_overrides.username.trim().isEmpty || _overrides.password.isEmpty)) {
         throw const FormatException('局域网代理缺少认证信息，已阻止启动未受保护的代理端口');
       }
+      final profilesForConnection = residentialDirect
+          ? const <SingBoxServerConfig>[]
+          : profiles;
+      final outboundTags = _outboundTagsFor(profilesForConnection);
       final taggedOutbounds = <Map<String, dynamic>>[];
-      final usedTags = <String>{
-        'proxy',
-        'auto',
-        'direct',
-        'hourglass-residential-ip',
-      };
-      String? selectedTag;
-      for (final profile
-          in residentialDirect ? const <SingBoxServerConfig>[] : profiles) {
+      String? selectedTag = selected == null ? null : outboundTags[selected.id];
+      for (final profile in profilesForConnection) {
         final outbound = profile.outbound;
         if (outbound == null) continue;
-        var tag = profile.name.isNotEmpty ? profile.name : profile.id;
-        if (usedTags.contains(tag)) {
-          final base = tag;
-          var suffix = 2;
-          while (usedTags.contains('$base ($suffix)')) {
-            suffix++;
-          }
-          tag = '$base ($suffix)';
-        }
-        usedTags.add(tag);
+        final tag = outboundTags[profile.id]!;
         taggedOutbounds.add({...outbound, 'tag': tag});
-        if (profile.id == selected?.id) selectedTag = tag;
       }
+      final residentialChainStaging =
+          _residential.enabled &&
+          _residential.mode == 'chain' &&
+          !includeResidential;
+      if (residentialChainStaging) {
+        // Keep the VPN active during the 5-second upstream stabilization
+        // window without exposing ordinary-node-only traffic.
+        const pendingTag = 'hourglass-residential-pending';
+        taggedOutbounds.add({'type': 'block', 'tag': pendingTag});
+        selectedTag = pendingTag;
+      }
+      String? residentialDetourTag;
       if (residentialEnabled) {
         if (!residentialDirect && selectedTag == null) {
           throw const FormatException('链式住宅 IP 模式需要先选择一个普通代理节点');
         }
         final residentialTag = 'hourglass-residential-ip';
+        residentialDetourTag = residentialDirect ? null : selectedTag;
         taggedOutbounds.add(
           _buildResidentialOutbound(
             tag: residentialTag,
-            detour: residentialDirect ? null : selectedTag,
+            detour: residentialDetourTag,
+            domainResolver: residentialDetourTag == null
+                ? null
+                : 'hourglass-residential-resolver',
           ),
         );
-        selectedTag = residentialTag;
+        selectedTag = residentialChainStaging
+            ? 'hourglass-residential-pending'
+            : residentialTag;
       }
       if (taggedOutbounds.isEmpty) {
         throw const FormatException('当前没有可用于连接的代理节点');
@@ -2292,11 +2501,22 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       final savedRules = await _loadUserRoutingRules(_engine);
       final base = await _engine.buildConfig(
         jsonEncode(taggedOutbounds),
-        rules: _effectiveRoutingRules(savedRules, globalTun: _globalTun),
+        rules: _effectiveRoutingRules(
+          savedRules,
+          globalTun:
+              _globalTun ||
+              (_residential.enabled && _residential.mode == 'chain'),
+        ),
         selectedTag: selectedTag,
       );
       final config = Map<String, dynamic>.from(jsonDecode(base) as Map);
-      if (residentialEnabled) _appendResidentialSiteTestGroups(config);
+      if (residentialDetourTag != null) {
+        _appendResidentialDnsResolver(config, detour: residentialDetourTag);
+      }
+      if (residentialEnabled) {
+        _forceResidentialFinalProxy(config);
+        _appendResidentialSiteTestGroups(config);
+      }
       _appendGeodataRules(config, geodataRules, globalTun: _globalTun);
       final ruleSetUpdates = await _prepareLocalRuleSets(_engine, config);
       final inbounds = (config['inbounds'] as List)
@@ -2369,9 +2589,93 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     }
   }
 
+  Map<String, String> _outboundTagsFor(Iterable<SingBoxServerConfig> profiles) {
+    final usedTags = <String>{
+      'proxy',
+      'auto',
+      'direct',
+      'hourglass-residential-ip',
+    };
+    final tags = <String, String>{};
+    for (final profile in profiles) {
+      if (profile.outbound == null) continue;
+      var tag = profile.name.isNotEmpty ? profile.name : profile.id;
+      if (usedTags.contains(tag)) {
+        final base = tag;
+        var suffix = 2;
+        while (usedTags.contains('$base ($suffix)')) {
+          suffix++;
+        }
+        tag = '$base ($suffix)';
+      }
+      usedTags.add(tag);
+      tags[profile.id] = tag;
+    }
+    return tags;
+  }
+
+  void _appendResidentialDnsResolver(
+    Map<String, dynamic> config, {
+    required String detour,
+  }) {
+    final dns = Map<String, dynamic>.from(config['dns'] as Map);
+    final servers = (dns['servers'] as List? ?? <dynamic>[])
+        .map((server) => Map<String, dynamic>.from(server as Map))
+        .toList();
+    if (!servers.any(
+      (server) => server['tag'] == 'hourglass-residential-resolver',
+    )) {
+      servers.add({
+        'type': 'https',
+        'tag': 'hourglass-residential-resolver',
+        'server': '1.1.1.1',
+        'server_port': 443,
+        'path': '/dns-query',
+        'tls': {'enabled': true, 'server_name': 'cloudflare-dns.com'},
+        'detour': detour,
+      });
+    }
+    dns['servers'] = servers;
+    config['dns'] = dns;
+  }
+
+  void _forceResidentialFinalProxy(Map<String, dynamic> config) {
+    const residentialTag = 'hourglass-residential-ip';
+    final outbounds = (config['outbounds'] as List)
+        .cast<Map<String, dynamic>>();
+    final residentialExists = outbounds.any(
+      (outbound) => outbound['tag'] == residentialTag,
+    );
+    if (!residentialExists) {
+      throw const FormatException('住宅代理出口未能加入连接配置');
+    }
+    final selector = outbounds.firstWhere(
+      (outbound) =>
+          outbound['tag'] == SingBoxConfigBuilder.proxyTag &&
+          outbound['type'] == 'selector',
+      orElse: () => <String, dynamic>{},
+    );
+    if (selector.isEmpty) {
+      throw const FormatException('代理选择器缺失，无法应用住宅 IP 链式出口');
+    }
+
+    // The normal node remains only as the residential proxy's upstream
+    // detour. Every route targeting `proxy` must exit through the residence.
+    selector['outbounds'] = [residentialTag];
+    selector['default'] = residentialTag;
+    selector['interrupt_exist_connections'] = true;
+    outbounds.removeWhere(
+      (outbound) =>
+          outbound['tag'] == SingBoxConfigBuilder.autoTag &&
+          outbound['type'] == 'urltest',
+    );
+    config['outbounds'] = outbounds;
+  }
+
   Map<String, dynamic> _buildResidentialOutbound({
     required String tag,
     String? detour,
+    String? domainResolver,
   }) {
     final server = _residential.server.trim();
     final port = _residential.port;
@@ -2385,8 +2689,10 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       'tag': tag,
       'server': server,
       'server_port': port,
+      'connect_timeout': '15s',
       if (isSocks) 'version': protocol == 'socks4' ? '4' : '5',
       if (protocol == 'https') 'tls': {'enabled': true, 'server_name': server},
+      if (domainResolver != null) 'domain_resolver': domainResolver,
       if (_residential.username.isNotEmpty) 'username': _residential.username,
       if (_residential.password.isNotEmpty && protocol != 'socks4')
         'password': _residential.password,
@@ -2542,7 +2848,13 @@ class _ProxyHomePageState extends State<ProxyHomePage>
 
   Future<void> _saveRoutingMode() async {
     final saved = await _loadUserRoutingRules(_engine);
-    await _saveUserRoutingRules(_engine, saved, globalTun: _globalTun);
+    final forceResidentialRoute =
+        _residential.enabled && _residential.mode == 'chain';
+    await _saveUserRoutingRules(
+      _engine,
+      saved,
+      globalTun: _globalTun || forceResidentialRoute,
+    );
   }
 
   Future<void> _selectRoutingMode(bool globalTun) async {
@@ -2568,12 +2880,17 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       _notice('该节点服务器地址是 127.0.0.1 / localhost，已判为无效');
       return;
     }
-    setState(() => _busy = true);
+    final selectionRevision = ++_nodeSelectionRevision;
+    setState(() {
+      _busy = true;
+      _activeId = server.id;
+    });
     try {
       await _disableDirectResidentialForNode();
       await _engine.setActiveServerConfig(server.id);
       final connected = _connection.status == SingBoxConnectionStatus.connected;
-      final switched = connected && await _trySwitchConnectedNode(server);
+      final switched =
+          connected && await _trySwitchConnectedNode(server, selectionRevision);
       if (connected && !switched) {
         await _saveRoutingMode();
         await _connectProfile(server);
@@ -2592,12 +2909,17 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       _notice('该节点服务器地址是 127.0.0.1 / localhost，已判为无效');
       return;
     }
-    setState(() => _busy = true);
+    final selectionRevision = ++_nodeSelectionRevision;
+    setState(() {
+      _busy = true;
+      _activeId = server.id;
+    });
     try {
       await _disableDirectResidentialForNode();
       await _engine.setActiveServerConfig(server.id);
       final connected = _connection.status == SingBoxConnectionStatus.connected;
-      final switched = connected && await _trySwitchConnectedNode(server);
+      final switched =
+          connected && await _trySwitchConnectedNode(server, selectionRevision);
       if (!switched) {
         await _saveRoutingMode();
         await _connectProfile(server);
@@ -2611,31 +2933,38 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     }
   }
 
-  Future<bool> _trySwitchConnectedNode(SingBoxServerConfig server) async {
+  Future<bool> _trySwitchConnectedNode(
+    SingBoxServerConfig server,
+    int selectionRevision,
+  ) async {
     // Use sing-box's live selector for ordinary node changes. Rebuilding the
     // Android VPN service while connected can stall OEM VpnService processes.
     if (_residential.enabled) return false;
-    final groups = await _engine.watchGroups().first.timeout(
-      const Duration(seconds: 3),
-    );
-    final selector = groups
-        .where((group) => group.tag == SingBoxConfigBuilder.proxyTag)
-        .firstOrNull;
-    if (selector == null || !selector.selectable) return false;
-    final item = selector.items
-        .where(
-          (candidate) =>
-              candidate.tag == server.name ||
-              candidate.tag.startsWith('${server.name} ('),
-        )
-        .firstOrNull;
-    if (item == null) return false;
+    final tag = _outboundTagsFor(
+      _servers.where((profile) => profile.enabled),
+    )[server.id];
+    if (tag == null) return false;
     // Do not start a second full config reload if the live selector call
     // fails or times out. That used to overlap two native service operations.
-    await _engine
-        .selectOutbound(selector.tag, item.tag)
-        .timeout(const Duration(seconds: 10));
-    return true;
+    return _queueOutboundSelection(tag, selectionRevision);
+  }
+
+  Future<bool> _queueOutboundSelection(String tag, int revision) {
+    final operation = _outboundSelectionQueue.then((_) async {
+      // A newer tap wins over any delayed URL-test selection.
+      if (revision != _nodeSelectionRevision) return false;
+      await _engine
+          .selectOutbound(SingBoxConfigBuilder.proxyTag, tag)
+          .timeout(const Duration(seconds: 10));
+      return true;
+    });
+    // Keep the queue usable after a failed native operation while returning
+    // the original error to the caller that requested this selection.
+    _outboundSelectionQueue = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return operation;
   }
 
   Future<void> _disableDirectResidentialForNode() async {
@@ -2743,7 +3072,12 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         builder: (_) => _ResidentialProxyPage(
           engine: _engine,
           initial: _residential,
+          initialResults: Map.of(_residentialConnectionResults),
           onSave: _saveResidentialSettings,
+          onResultsChanged: (results) {
+            _residentialConnectionResults = Map.of(results);
+          },
+          waitForConnectionReady: _waitForResidentialConnectionReady,
         ),
       ),
     );
@@ -2752,6 +3086,10 @@ class _ProxyHomePageState extends State<ProxyHomePage>
   Future<void> _saveResidentialSettings(
     _ResidentialProxySettings settings,
   ) async {
+    if (_busy) {
+      _notice('连接正在切换，请稍后再保存住宅 IP 设置');
+      return;
+    }
     final previous = _residential;
     await _writeProtectedString(
       _residentialProxyPrefsKey,
@@ -2768,11 +3106,14 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       final selected = settings.enabled && settings.mode == 'direct'
           ? null
           : _servers.where((server) => server.id == _activeId).firstOrNull;
+      if (active && mounted) setState(() => _busy = true);
       try {
         await _connectProfile(selected);
       } on Object catch (error) {
         _notice('设置已保存，但重新应用连接失败：${_friendlyError(error)}');
         return;
+      } finally {
+        if (active && mounted) setState(() => _busy = false);
       }
     } else if (active &&
         previous.enabled &&
@@ -3362,11 +3703,18 @@ class _ResidentialProxyPage extends StatefulWidget {
   const _ResidentialProxyPage({
     required this.engine,
     required this.initial,
+    required this.initialResults,
     required this.onSave,
+    required this.onResultsChanged,
+    required this.waitForConnectionReady,
   });
   final SingBox engine;
   final _ResidentialProxySettings initial;
+  final Map<String, _ResidentialSiteResult> initialResults;
   final Future<void> Function(_ResidentialProxySettings) onSave;
+  final ValueChanged<Map<String, _ResidentialSiteResult>> onResultsChanged;
+  final Future<Map<String, _ResidentialSiteResult>> Function()
+  waitForConnectionReady;
 
   @override
   State<_ResidentialProxyPage> createState() => _ResidentialProxyPageState();
@@ -3394,11 +3742,29 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
   @override
   void initState() {
     super.initState();
+    _siteResults.addAll(widget.initialResults);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _value.enabled && widget.engine.isConnected) {
-        _testAllSites();
+      if (mounted &&
+          _value.enabled &&
+          widget.engine.isConnected &&
+          !_hasCompleteResults) {
+        _testAfterConnectionSettles();
       }
     });
+  }
+
+  bool get _hasCompleteResults => _residentialSiteTargets.every(
+    (site) => _siteResults.containsKey(site.id),
+  );
+
+  Future<void> _testAfterConnectionSettles() async {
+    final readyResults = await widget.waitForConnectionReady();
+    if (readyResults.isNotEmpty && mounted) {
+      setState(() => _siteResults.addAll(readyResults));
+      return;
+    }
+    if (!mounted || !_value.enabled || !widget.engine.isConnected) return;
+    await _testAllSites();
   }
 
   @override
@@ -3432,12 +3798,19 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
       await widget.onSave(next);
       if (mounted && next.enabled && widget.engine.isConnected) {
         setState(() => _value = next);
-        await _testAllSites();
+        unawaited(_refreshConnectionResults());
       } else if (mounted) {
         Navigator.of(context).pop();
       }
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _refreshConnectionResults() async {
+    final readyResults = await widget.waitForConnectionReady();
+    if (mounted && readyResults.isNotEmpty) {
+      setState(() => _siteResults.addAll(readyResults));
     }
   }
 
@@ -3530,6 +3903,7 @@ class _ResidentialProxyPageState extends State<_ResidentialProxyPage> {
           _siteResults[site.id] = result;
           _testingSites.remove(site.id);
         });
+        widget.onResultsChanged(Map.of(_siteResults));
       }
     }
   }
@@ -9585,7 +9959,7 @@ Color _latencyColor(int ms) => ms < 120
     : const Color(0xFFCA5F6A);
 
 void _appendSample(List<double> values, double value) {
-  values.add(value);
+  values.add(value.isFinite ? value.clamp(0, double.infinity).toDouble() : 0);
   if (values.length > 36) values.removeAt(0);
 }
 
@@ -10004,6 +10378,7 @@ IconData _protocolIcon(String protocol) => switch (protocol.toLowerCase()) {
 };
 
 String _formatRate(int bytes) {
+  bytes = bytes < 0 ? 0 : bytes;
   if (bytes < 1024) return '$bytes B/s';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB/s';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB/s';
