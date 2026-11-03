@@ -16,9 +16,10 @@ import 'subscription_support.dart';
 const _ink = Color(0xFF14223A);
 const _blue = Color(0xFF4E8DF5);
 const _mint = Color(0xFF4BCDB0);
-const _appVersion = '1.28.58';
+const _appVersion = '1.28.59';
 const _repositoryUrl = 'https://github.com/2786256218/Hourglass-Proxy-Tools';
 const _routingPrefsKey = 'hourglass.userRoutingRules.v1';
+const _routingModePrefsKey = 'hourglass.routingMode.v1';
 const _subscriptionGroupsPrefsKey = 'hourglass.subscriptionGroups.v1';
 const _subscriptionNamesPrefsKey = 'hourglass.subscriptionNames.v1';
 const _subscriptionSyncTimesPrefsKey = 'hourglass.subscriptionSyncTimes.v1';
@@ -1035,24 +1036,53 @@ Future<void> _configureReleaseHttpClient(HttpClient client) async {
   }
 }
 
+bool _isRetryableUpdateError(Object error) {
+  if (error is SocketException ||
+      error is TimeoutException ||
+      error is HandshakeException) {
+    return true;
+  }
+  if (error is HttpException) {
+    final status = RegExp(r'状态码\s+(\d+)').firstMatch(error.message);
+    final code = int.tryParse(status?.group(1) ?? '');
+    return code == 408 ||
+        code == 429 ||
+        (code != null && code >= 500) ||
+        error.message.contains('下载不完整');
+  }
+  return false;
+}
+
 Future<_GithubRelease?> _requestLatestRelease() async {
-  final client = HttpClient()..connectionTimeout = const Duration(seconds: 12);
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await _requestLatestReleaseOnce();
+    } on Object catch (error) {
+      if (attempt == 3 || !_isRetryableUpdateError(error)) rethrow;
+      await Future<void>.delayed(Duration(milliseconds: 500 * attempt));
+    }
+  }
+  return null;
+}
+
+Future<_GithubRelease?> _requestLatestReleaseOnce() async {
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
   try {
     await _configureReleaseHttpClient(client);
     final request = await client
         .getUrl(Uri.parse(_githubLatestReleaseApi))
-        .timeout(const Duration(seconds: 15));
+        .timeout(const Duration(seconds: 12));
     request.headers
       ..set(HttpHeaders.acceptHeader, 'application/vnd.github+json')
       ..set(HttpHeaders.userAgentHeader, 'Hourglass-Android/$_appVersion');
-    final response = await request.close().timeout(const Duration(seconds: 15));
+    final response = await request.close().timeout(const Duration(seconds: 12));
     if (response.statusCode != HttpStatus.ok) {
       throw HttpException('GitHub 返回状态码 ${response.statusCode}');
     }
     final body = await response
         .transform(utf8.decoder)
         .join()
-        .timeout(const Duration(seconds: 15));
+        .timeout(const Duration(seconds: 12));
     final decoded = jsonDecode(body);
     if (decoded is! Map) throw const FormatException('Release 响应格式无效');
     final tag = (decoded['tag_name'] ?? '').toString().trim();
@@ -1117,6 +1147,22 @@ bool _isNewerVersion(String candidate, String current) {
 }
 
 Future<File> _downloadReleaseApk(
+  _GithubRelease release, {
+  void Function(int receivedBytes, int totalBytes)? onProgress,
+}) async {
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await _downloadReleaseApkOnce(release, onProgress: onProgress);
+    } on Object catch (error) {
+      if (attempt == 3 || !_isRetryableUpdateError(error)) rethrow;
+      onProgress?.call(0, 0);
+      await Future<void>.delayed(Duration(milliseconds: 700 * attempt));
+    }
+  }
+  throw const HttpException('GitHub APK 下载重试失败');
+}
+
+Future<File> _downloadReleaseApkOnce(
   _GithubRelease release, {
   void Function(int receivedBytes, int totalBytes)? onProgress,
 }) async {
@@ -1553,6 +1599,21 @@ class _ProxyHomePageState extends State<ProxyHomePage>
       _applyOverridesToEngine();
       await _engine.initialize();
       final savedRules = await _engine.getRoutingRules();
+      final savedRoutingRules = await _readProtectedString(_routingPrefsKey);
+      final savedRoutingMode = await _readProtectedString(_routingModePrefsKey);
+      final globalTun = savedRoutingMode == 'tun'
+          ? true
+          : savedRoutingMode == 'system'
+          ? false
+          : savedRoutingRules != null &&
+                (!savedRules.bypassCountries.contains('cn') &&
+                    !savedRules.bypassLan);
+      if (savedRoutingMode == null) {
+        await _writeProtectedString(
+          _routingModePrefsKey,
+          globalTun ? 'tun' : 'system',
+        );
+      }
       final values = await Future.wait([
         _engine.getServerConfigs(),
         _engine.getActiveServerConfig(),
@@ -1563,8 +1624,7 @@ class _ProxyHomePageState extends State<ProxyHomePage>
         _servers = values[0] as List<SingBoxServerConfig>;
         _activeId = (values[1] as SingBoxServerConfig?)?.id;
         _connection = values[2] as SingBoxConnectionState;
-        _globalTun =
-            !savedRules.bypassCountries.contains('cn') && !savedRules.bypassLan;
+        _globalTun = globalTun;
         _ready = true;
       });
       _stateSub = _engine.watchConnectionState().listen((state) {
@@ -2866,6 +2926,10 @@ class _ProxyHomePageState extends State<ProxyHomePage>
     });
     try {
       await _saveRoutingMode();
+      await _writeProtectedString(
+        _routingModePrefsKey,
+        globalTun ? 'tun' : 'system',
+      );
     } on Object catch (error) {
       if (mounted) setState(() => _globalTun = previousMode);
       _notice(_friendlyError(error));
