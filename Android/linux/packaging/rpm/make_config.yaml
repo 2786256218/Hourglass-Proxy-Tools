@@ -4,7 +4,7 @@ summary: Hourglass
 group: Applications/Internet
 vendor: Hourglass
 packager: Hourglass
-license: Other
+license: GPL-3.0-or-later
 priority: optional
 section: x11
 essential: false

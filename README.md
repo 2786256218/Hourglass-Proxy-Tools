@@ -35,7 +35,7 @@ APK 输出在 `build/app/outputs/flutter-apk/`。发布正式版本时请使用�
 
 ### 许可证
 
-项目使用 GPL-3.0-or-later。`sing_box` 插件及随包使用的 sing-box 核心也受其各自许可证和版权声明约束。
+项目使用 [GPL-3.0-or-later](LICENSE)。`sing_box` 插件及随包使用的 sing-box 核心也受其各自许可证和版权声明约束。
 
 ## English
 
@@ -70,4 +70,4 @@ APK files are written to `build/app/outputs/flutter-apk/`. Use your own signing 
 
 ### License
 
-This project is licensed under GPL-3.0-or-later. The `sing_box` plugin and bundled sing-box core are also subject to their respective licenses and copyright notices.
+This project is licensed under [GPL-3.0-or-later](LICENSE). The `sing_box` plugin and bundled sing-box core are also subject to their respective licenses and copyright notices.
